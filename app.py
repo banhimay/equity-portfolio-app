@@ -201,31 +201,33 @@ if not portfolio_df.empty:
 st.markdown("---")
 
 # --- PAGES ---
+FORMAT_DICT = {
+    'Avg_Cost': '₹{:.2f}', 'Total_Cost': '₹{:.2f}', 'CMP': '₹{:.2f}',
+    'Total_Value': '₹{:.2f}', 'Unrealized_PL': '₹{:.2f}',
+    'Realized_PL': '₹{:.2f}', 'Total_Net_Gain': '₹{:.2f}', 'Allocation_%': '{:.1%}'
+}
+
 if page == "Dashboard Overview":
     st.subheader("📊 Complete Portfolio Overview")
     if not portfolio_df.empty:
-        st.dataframe(portfolio_df.style.format({
-            'Avg_Cost': '₹{:.2f}', 'Total_Cost': '₹{:.2f}', 'CMP': '₹{:.2f}',
-            'Total_Value': '₹{:.2f}', 'Unrealized_PL': '₹{:.2f}',
-            'Realized_PL': '₹{:.2f}', 'Total_Net_Gain': '₹{:.2f}', 'Allocation_%': '{:.2%}'
-        }), use_container_width=True)
+        st.dataframe(portfolio_df.style.format(FORMAT_DICT), use_container_width=True)
     else:
         st.info("No trades yet. Add one from the 'Add Trade' page.")
 
 elif page == "Core Holdings":
     st.subheader("🎯 Core Holdings")
     core = portfolio_df[(portfolio_df['Type'] == 'CORE') & (portfolio_df['Units'] > 0)]
-    st.dataframe(core, use_container_width=True)
+    st.dataframe(core.style.format(FORMAT_DICT), use_container_width=True)
 
 elif page == "Satellite Holdings":
     st.subheader("🚀 Satellite Holdings")
     sat = portfolio_df[(portfolio_df['Type'] == 'SATELLITE') & (portfolio_df['Units'] > 0)]
-    st.dataframe(sat, use_container_width=True)
+    st.dataframe(sat.style.format(FORMAT_DICT), use_container_width=True)
 
 elif page == "Loss Booked":
     st.subheader("🔻 Booked Losses & Closed Positions")
     closed = portfolio_df[(portfolio_df['Units'] == 0) & (portfolio_df['Realized_PL'] < 0)]
-    st.dataframe(closed, use_container_width=True)
+    st.dataframe(closed.style.format(FORMAT_DICT), use_container_width=True)
 
 elif page == "Add Trade":
     st.subheader("📝 Record New Trade")
