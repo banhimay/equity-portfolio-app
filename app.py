@@ -207,6 +207,29 @@ FORMAT_DICT = {
     'Realized_PL': '₹{:.2f}', 'Total_Net_Gain': '₹{:.2f}', 'Allocation_%': '{:.1%}'
 }
 
+def render_totals_bar(df, color):
+    st.markdown(
+        f"""
+        <div style='display:flex; justify-content:space-between; flex-wrap:wrap;
+                    padding:14px 18px; margin-top:10px; background-color:#F5F5F5;
+                    border-top:3px solid {color}; border-radius:4px;'>
+            <div style='font-size:20px; font-weight:800; color:{color};'>
+                Total Cost: ₹{df['Total_Cost'].sum():,.2f}
+            </div>
+            <div style='font-size:20px; font-weight:800; color:{color};'>
+                Unrealized P&L: ₹{df['Unrealized_PL'].sum():,.2f}
+            </div>
+            <div style='font-size:20px; font-weight:800; color:{color};'>
+                Realized P&L: ₹{df['Realized_PL'].sum():,.2f}
+            </div>
+            <div style='font-size:20px; font-weight:800; color:{color};'>
+                Total Net Gain: ₹{df['Total_Net_Gain'].sum():,.2f}
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
 if page == "Dashboard Overview":
     st.subheader("📊 Complete Portfolio Overview")
     if not portfolio_df.empty:
@@ -219,20 +242,14 @@ elif page == "Core Holdings":
     core = portfolio_df[(portfolio_df['Type'] == 'CORE') & (portfolio_df['Units'] > 0)].drop(columns=['Type']).reset_index(drop=True)
     core.index = core.index + 1
     st.dataframe(core.style.format(FORMAT_DICT), use_container_width=True)
-    st.markdown(
-        f"<p style='font-size:18px; font-weight:bold; color:#1F77B4;'>Total Core Holdings: {len(core)}</p>",
-        unsafe_allow_html=True
-    )
+    render_totals_bar(core, '#1F77B4')
 
 elif page == "Satellite Holdings":
     st.subheader("🚀 Satellite Holdings")
     sat = portfolio_df[(portfolio_df['Type'] == 'SATELLITE') & (portfolio_df['Units'] > 0)].drop(columns=['Type']).reset_index(drop=True)
     sat.index = sat.index + 1
     st.dataframe(sat.style.format(FORMAT_DICT), use_container_width=True)
-    st.markdown(
-        f"<p style='font-size:18px; font-weight:bold; color:#D62728;'>Total Satellite Holdings: {len(sat)}</p>",
-        unsafe_allow_html=True
-    )
+    render_totals_bar(sat, '#D62728')
 
 elif page == "Loss Booked":
     st.subheader("🔻 Booked Losses & Closed Positions")
