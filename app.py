@@ -216,13 +216,23 @@ if page == "Dashboard Overview":
 
 elif page == "Core Holdings":
     st.subheader("🎯 Core Holdings")
-    core = portfolio_df[(portfolio_df['Type'] == 'CORE') & (portfolio_df['Units'] > 0)]
+    core = portfolio_df[(portfolio_df['Type'] == 'CORE') & (portfolio_df['Units'] > 0)].drop(columns=['Type']).reset_index(drop=True)
+    core.index = core.index + 1
     st.dataframe(core.style.format(FORMAT_DICT), use_container_width=True)
+    st.markdown(
+        f"<p style='font-size:18px; font-weight:bold; color:#1F77B4;'>Total Core Holdings: {len(core)}</p>",
+        unsafe_allow_html=True
+    )
 
 elif page == "Satellite Holdings":
     st.subheader("🚀 Satellite Holdings")
-    sat = portfolio_df[(portfolio_df['Type'] == 'SATELLITE') & (portfolio_df['Units'] > 0)]
+    sat = portfolio_df[(portfolio_df['Type'] == 'SATELLITE') & (portfolio_df['Units'] > 0)].drop(columns=['Type']).reset_index(drop=True)
+    sat.index = sat.index + 1
     st.dataframe(sat.style.format(FORMAT_DICT), use_container_width=True)
+    st.markdown(
+        f"<p style='font-size:18px; font-weight:bold; color:#D62728;'>Total Satellite Holdings: {len(sat)}</p>",
+        unsafe_allow_html=True
+    )
 
 elif page == "Loss Booked":
     st.subheader("🔻 Booked Losses & Closed Positions")
