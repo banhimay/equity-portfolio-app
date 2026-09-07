@@ -172,9 +172,98 @@ def compute_portfolio(df, overrides_df):
 
 portfolio_df, processed_trades = compute_portfolio(trades_df, overrides_df)
 
+# --- INDIVIDUAL STOCK TRANCHE + STOP-LOSS ENGINE ---
+def get_remaining_lots(df, ptype, stock):
+    """Re-runs FIFO for one (Type, Stock) and returns only the lots still held,
+    in chronological (buy) order, each as {date, price, qty}."""
+    sub = df[(df['TYPE'].str.strip().str.upper() == ptype) &
+             (df['Stock'].str.strip().str.upper() == stock)].copy()
+    sub['Date of Trxn'] = pd.to_datetime(sub['Date of Trxn'])
+    sub = sub.sort_values(by='Date of Trxn')
+
+    lots = []  # {date, price, remaining}
+    for _, row in sub.iterrows():
+        qty = float(row['Unit'])
+        price = float(row['Price'])
+        if qty >= 0:
+            lots.append({'date': row['Date of Trxn'], 'price': price, 'remaining': qty})
+        else:
+            to_sell = abs(qty)
+            for lot in lots:
+                if to_sell <= 0:
+                    break
+                if lot['remaining'] <= 0:
+                    continue
+                consume = min(lot['remaining'], to_sell)
+                lot['remaining'] -= consume
+                to_sell -= consume
+
+    return [l for l in lots if l['remaining'] > 0]
+
+def build_tranche_table(lots, cmp_price):
+    """Builds the tranche-by-tranche breakdown with weighted avg, growth %,
+    P/L, and the stop-loss rule:
+      Tranche 1        -> 10% below its own buy price
+      Tranche 2        -> price that keeps TOTAL risk in rupees the same as Tranche 1's risk
+      Tranche 3 onward -> breakeven (stop loss = cumulative weighted avg cost)
+    """
+    rows = []
+    cum_qty = 0.0
+    cum_investment = 0.0
+    prev_buy_price = None
+    prev_risk_amount = None
+
+    for i, lot in enumerate(lots):
+        tranche_no = i + 1
+        qty = lot['remaining']
+        price = lot['price']
+        investment = qty * price
+
+        cum_qty += qty
+        cum_investment += investment
+        weighted_avg = cum_investment / cum_qty if cum_qty > 0 else 0.0
+
+        if tranche_no == 1:
+            sl_rule = "10% below buy price"
+            sl_price = price * 0.90
+        elif tranche_no == 2:
+            sl_rule = "Residual (same ₹ risk as Tranche 1)"
+            sl_price = weighted_avg - (prev_risk_amount / cum_qty)
+        else:
+            sl_rule = "Breakeven (all tranches)"
+            sl_price = weighted_avg
+
+        risk_amount = (weighted_avg - sl_price) * cum_qty
+
+        growth_from_prev = ((price - prev_buy_price) / prev_buy_price) if prev_buy_price else None
+        growth_from_cmp = ((cmp_price - price) / price) if price else None
+        tranche_pl = qty * (cmp_price - price)
+
+        rows.append({
+            'Tranche': tranche_no,
+            'Buy Date': lot['date'].strftime('%Y-%m-%d'),
+            'Buy Price': price,
+            'Qty': qty,
+            'Investment': investment,
+            'Cum. Qty': cum_qty,
+            'Weighted Avg Cost': weighted_avg,
+            'Growth % vs Prev Tranche': growth_from_prev,
+            'Growth % vs CMP': growth_from_cmp,
+            'Stop-Loss Rule': sl_rule,
+            'Stop-Loss Price': sl_price,
+            'Risk Amount (₹)': risk_amount,
+            'Tranche P/L (₹)': tranche_pl,
+        })
+
+        prev_buy_price = price
+        prev_risk_amount = risk_amount
+
+    return pd.DataFrame(rows)
+
 # --- NAVIGATION SIDEBAR ---
 st.sidebar.title("📌 Menu")
-page = st.sidebar.radio("Go to", ["Dashboard Overview", "Core Holdings", "Satellite Holdings", "Loss Booked", "Add Trade", "CMP Overrides"])
+page = st.sidebar.radio("Go to", ["Dashboard Overview", "Core Holdings", "Satellite Holdings",
+                                    "Loss Booked", "Individual Stock", "Add Trade", "CMP Overrides"])
 
 if st.sidebar.button("Logout"):
     st.session_state["authenticated"] = False
@@ -255,6 +344,80 @@ elif page == "Loss Booked":
     st.subheader("🔻 Booked Losses & Closed Positions")
     closed = portfolio_df[(portfolio_df['Units'] == 0) & (portfolio_df['Realized_PL'] < 0)]
     st.dataframe(closed.style.format(FORMAT_DICT), use_container_width=True)
+
+elif page == "Individual Stock":
+    st.subheader("🔍 Individual Stock Analysis")
+
+    open_positions = portfolio_df[portfolio_df['Units'] > 0].copy()
+    if open_positions.empty:
+        st.info("No open positions to analyze.")
+    else:
+        open_positions['Label'] = open_positions['Type'] + " — " + open_positions['Stock']
+        choice = st.selectbox("Select a stock", open_positions['Label'].tolist())
+        sel_type, sel_stock = choice.split(" — ")
+
+        lots = get_remaining_lots(processed_trades, sel_type, sel_stock)
+        cmp_row = open_positions[(open_positions['Type'] == sel_type) & (open_positions['Stock'] == sel_stock)]
+        cmp_price = float(cmp_row['CMP'].iloc[0])
+
+        if not lots:
+            st.warning("No open tranches found for this stock.")
+        else:
+            tranche_df = build_tranche_table(lots, cmp_price)
+
+            total_qty = tranche_df['Cum. Qty'].iloc[-1]
+            total_investment = tranche_df['Investment'].sum()
+            weighted_avg = tranche_df['Weighted Avg Cost'].iloc[-1]
+            current_sl_price = tranche_df['Stop-Loss Price'].iloc[-1]
+            current_risk = tranche_df['Risk Amount (₹)'].iloc[-1]
+            current_val = total_qty * cmp_price
+            current_pl = current_val - total_investment
+            current_pl_pct = (current_pl / total_investment) if total_investment > 0 else 0
+
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("CMP", f"₹{cmp_price:,.2f}")
+            c2.metric("Weighted Avg Cost", f"₹{weighted_avg:,.2f}")
+            c3.metric("Unrealized P&L", f"₹{current_pl:,.2f}", delta=f"{current_pl_pct*100:.2f}%")
+            c4.metric("Current Stop-Loss", f"₹{current_sl_price:,.2f}",
+                      delta=f"Risk ₹{current_risk:,.2f}" if current_risk > 0 else "Risk-free (breakeven)")
+
+            st.markdown("#### Tranche Breakdown & Stop-Loss")
+            display_df = tranche_df.copy()
+            display_df.index = display_df.index + 1
+            st.dataframe(
+                display_df.style.format({
+                    'Buy Price': '₹{:.2f}', 'Investment': '₹{:.2f}', 'Weighted Avg Cost': '₹{:.2f}',
+                    'Growth % vs Prev Tranche': lambda v: f'{v:.1%}' if pd.notna(v) else '—',
+                    'Growth % vs CMP': lambda v: f'{v:.1%}' if pd.notna(v) else '—',
+                    'Stop-Loss Price': '₹{:.2f}', 'Risk Amount (₹)': '₹{:.2f}', 'Tranche P/L (₹)': '₹{:.2f}',
+                }),
+                use_container_width=True
+            )
+
+            st.markdown("#### Profit Target Ladder")
+            targets = []
+            for pct in [10, 15, 20, 25]:
+                target_price = weighted_avg * (1 + pct / 100)
+                targets.append({'Profit Target': f'{pct}% on total investment', 'Target Price': target_price})
+            target_df = pd.DataFrame(targets)
+            st.dataframe(target_df.style.format({'Target Price': '₹{:.2f}'}), use_container_width=True, hide_index=True)
+
+            st.markdown("#### Risk : Reward")
+            reward_15pct = total_investment * 0.15
+            if current_risk > 0:
+                ratio = reward_15pct / current_risk
+                st.markdown(
+                    f"<p style='font-size:20px; font-weight:800; color:#8B0000;'>"
+                    f"1 : {ratio:.1f}  <span style='font-size:14px; font-weight:400; color:#555;'>"
+                    f"(risk ₹{current_risk:,.0f} vs. reward at 15% profit target)</span></p>",
+                    unsafe_allow_html=True
+                )
+            else:
+                st.markdown(
+                    "<p style='font-size:20px; font-weight:800; color:#008000;'>"
+                    "Position is risk-free — stop-loss is at or above breakeven.</p>",
+                    unsafe_allow_html=True
+                )
 
 elif page == "Add Trade":
     st.subheader("📝 Record New Trade")
