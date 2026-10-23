@@ -263,7 +263,7 @@ def build_tranche_table(lots, cmp_price):
 # --- NAVIGATION SIDEBAR ---
 st.sidebar.title("📌 Menu")
 page = st.sidebar.radio("Go to", ["Dashboard Overview", "Core Holdings", "Satellite Holdings",
-                                    "Loss Booked", "Individual Stock", "Add Trade", "CMP Overrides"])
+                                    "Loss Booked", "Individual Stock", "Trade Book", "Add Trade", "CMP Overrides"])
 
 if st.sidebar.button("Logout"):
     st.session_state["authenticated"] = False
@@ -418,6 +418,62 @@ elif page == "Individual Stock":
                     "Position is risk-free — stop-loss is at or above breakeven.</p>",
                     unsafe_allow_html=True
                 )
+
+elif page == "Trade Book":
+    st.subheader("📒 Trade Book")
+    if trades_df.empty:
+        st.info("No trades recorded yet. Add one from the 'Add Trade' page.")
+    else:
+        tb_view = trades_df.copy()
+        tb_view['Date of Trxn'] = pd.to_datetime(tb_view['Date of Trxn'])
+        tb_view['Amount'] = tb_view['Price'].astype(float) * tb_view['Unit'].astype(float)
+        tb_view['Action'] = tb_view['Unit'].apply(lambda u: 'BUY' if float(u) > 0 else 'SELL')
+
+        f1, f2, f3 = st.columns(3)
+        type_sel = f1.selectbox("Type", ["All", "CORE", "SATELLITE"])
+        stock_sel = f2.selectbox("Stock", ["All"] + sorted(tb_view['Stock'].astype(str).unique().tolist()))
+        action_sel = f3.selectbox("Action", ["All", "BUY", "SELL"])
+
+        if type_sel != "All":
+            tb_view = tb_view[tb_view['TYPE'] == type_sel]
+        if stock_sel != "All":
+            tb_view = tb_view[tb_view['Stock'].astype(str) == stock_sel]
+        if action_sel != "All":
+            tb_view = tb_view[tb_view['Action'] == action_sel]
+
+        tb_view = tb_view.sort_values('Date of Trxn', ascending=False).reset_index(drop=True)
+        tb_view.index = tb_view.index + 1
+        tb_view = tb_view[['TYPE', 'Stock', 'Date of Trxn', 'Action', 'Price', 'Unit', 'Amount']]
+
+        st.dataframe(
+            tb_view.style.format({
+                'Date of Trxn': lambda d: d.strftime('%d-%b-%Y'),
+                'Price': '₹{:,.2f}', 'Unit': '{:,.0f}', 'Amount': '₹{:,.2f}'
+            }),
+            use_container_width=True
+        )
+
+        buys = tb_view[tb_view['Action'] == 'BUY']['Amount'].sum()
+        sells = -tb_view[tb_view['Action'] == 'SELL']['Amount'].sum()
+        st.markdown(
+            f"""
+            <div style='display:flex; justify-content:space-between; flex-wrap:wrap;
+                        padding:14px 18px; margin-top:10px; background-color:#F5F5F5;
+                        border-top:3px solid #6A1B9A; border-radius:4px;'>
+                <div style='font-size:20px; font-weight:800; color:#6A1B9A;'>Trades: {len(tb_view)}</div>
+                <div style='font-size:20px; font-weight:800; color:#6A1B9A;'>Total Bought: ₹{buys:,.2f}</div>
+                <div style='font-size:20px; font-weight:800; color:#6A1B9A;'>Total Sold: ₹{sells:,.2f}</div>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+        st.download_button(
+            "⬇️ Download as CSV",
+            tb_view.to_csv(index=False).encode('utf-8'),
+            file_name="trade_book.csv",
+            mime="text/csv"
+        )
 
 elif page == "Add Trade":
     st.subheader("📝 Record New Trade")
