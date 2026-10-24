@@ -263,7 +263,7 @@ def build_tranche_table(lots, cmp_price):
 # --- NAVIGATION SIDEBAR ---
 st.sidebar.title("📌 Menu")
 page = st.sidebar.radio("Go to", ["Dashboard Overview", "Core Holdings", "Satellite Holdings",
-                                    "Loss Booked", "Individual Stock", "Trade Book", "Add Trade", "CMP Overrides"])
+                                    "Profit/Loss", "Individual Stock", "Trade Book", "Add Trade", "CMP Overrides"])
 
 if st.sidebar.button("Logout"):
     st.session_state["authenticated"] = False
@@ -340,7 +340,7 @@ elif page == "Satellite Holdings":
     st.dataframe(sat.style.format(FORMAT_DICT), use_container_width=True)
     render_totals_bar(sat, '#D62728')
 
-elif page == "Loss Booked":
+elif page == "Profit/Loss":
     st.subheader("🔻 Booked Losses & Closed Positions")
     closed = portfolio_df[(portfolio_df['Units'] == 0) & (portfolio_df['Realized_PL'] < 0)]
     st.dataframe(closed.style.format(FORMAT_DICT), use_container_width=True)
@@ -433,6 +433,22 @@ elif page == "Trade Book":
         type_sel = f1.selectbox("Type", ["All", "CORE", "SATELLITE"])
         stock_sel = f2.selectbox("Stock", ["All"] + sorted(tb_view['Stock'].astype(str).unique().tolist()))
         action_sel = f3.selectbox("Action", ["All", "BUY", "SELL"])
+
+        if stock_sel != "All":
+            pos = portfolio_df[portfolio_df['Stock'] == str(stock_sel).strip().upper()]
+            if type_sel != "All":
+                pos = pos[pos['Type'] == type_sel]
+            held = pos[pos['Units'] > 0]
+            s_val = held['Total_Value'].sum()
+            s_cost = held['Total_Cost'].sum()
+            s_unreal = held['Unrealized_PL'].sum()
+            s_real = pos['Realized_PL'].sum()
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Current Value", f"₹{s_val:,.2f}")
+            m2.metric("Total Invested", f"₹{s_cost:,.2f}")
+            m3.metric("Unrealized P/L", f"₹{s_unreal:,.2f}",
+                      delta=f"{(s_unreal/s_cost*100) if s_cost > 0 else 0:.2f}%")
+            m4.metric("Realized P/L", f"₹{s_real:,.2f}")
 
         if type_sel != "All":
             tb_view = tb_view[tb_view['TYPE'] == type_sel]
