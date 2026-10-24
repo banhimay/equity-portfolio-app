@@ -395,7 +395,8 @@ def build_closed_lots_table(df, ptype, stock):
 # --- NAVIGATION SIDEBAR ---
 st.sidebar.title("📌 Menu")
 page = st.sidebar.radio("Go to", ["Dashboard Overview", "Core Holdings", "Satellite Holdings",
-                                    "Profit/Loss", "Individual Stock", "Trade Book", "Add Trade", "CMP Overrides"])
+                                    "Profit/Loss", "Individual Stock", "Trade Book", "Add Trade", "CMP Overrides"],
+                        key="nav_page")
 
 if st.sidebar.button("Logout"):
     st.session_state["authenticated"] = False
@@ -451,6 +452,42 @@ def render_totals_bar(df, color):
         unsafe_allow_html=True
     )
 
+def go_to_stock(label):
+    """Button callback: jump to the Individual Stock page with this stock pre-selected."""
+    st.session_state["nav_page"] = "Individual Stock"
+    st.session_state["ind_stock_choice"] = label
+
+def render_holdings_grid(df, ptype):
+    """Holdings table whose Stock names are clickable links to the Individual Stock page."""
+    heads = ['#', 'Stock', 'Units', 'Avg Cost', 'Total Cost', 'CMP', 'Total Value',
+             'Unrealized P/L', 'Realized P/L', 'Net Gain', 'Alloc %']
+    widths = [0.5, 1.8, 0.8, 1.2, 1.3, 1.1, 1.4, 1.4, 1.3, 1.3, 0.9]
+    left = {'#', 'Stock'}
+    hc = st.columns(widths)
+    for c, h in zip(hc, heads):
+        align = 'left' if h in left else 'right'
+        c.markdown(f"<div style='font-weight:700; font-size:13px; text-align:{align};'>{h}</div>",
+                   unsafe_allow_html=True)
+    st.markdown("<hr style='margin:2px 0 4px 0;'>", unsafe_allow_html=True)
+
+    def cell(col, text):
+        col.markdown(f"<div style='font-size:13px; text-align:right;'>{text}</div>", unsafe_allow_html=True)
+
+    for i, (_, r) in enumerate(df.iterrows(), start=1):
+        cols = st.columns(widths, vertical_alignment="center")
+        cols[0].markdown(f"<div style='font-size:13px;'>{i}</div>", unsafe_allow_html=True)
+        cols[1].button(str(r['Stock']), key=f"hold_{ptype}_{i}_{r['Stock']}", type="tertiary",
+                       on_click=go_to_stock, args=(f"{ptype} — {r['Stock']}",))
+        cell(cols[2], f"{int(r['Units']):,}")
+        cell(cols[3], f"₹{r['Avg_Cost']:,.2f}")
+        cell(cols[4], f"₹{r['Total_Cost']:,.2f}")
+        cell(cols[5], f"₹{r['CMP']:,.2f}")
+        cell(cols[6], f"₹{r['Total_Value']:,.2f}")
+        cell(cols[7], f"₹{r['Unrealized_PL']:,.2f}")
+        cell(cols[8], f"₹{r['Realized_PL']:,.2f}")
+        cell(cols[9], f"₹{r['Total_Net_Gain']:,.2f}")
+        cell(cols[10], f"{r['Allocation_%']:.1%}")
+
 if page == "Dashboard Overview":
     st.subheader("📊 Complete Portfolio Overview")
     if not portfolio_df.empty:
@@ -462,14 +499,16 @@ elif page == "Core Holdings":
     st.subheader("🎯 Core Holdings")
     core = portfolio_df[(portfolio_df['Type'] == 'CORE') & (portfolio_df['Units'] > 0)].drop(columns=['Type']).reset_index(drop=True)
     core.index = core.index + 1
-    st.dataframe(core.style.format(FORMAT_DICT), use_container_width=True)
+    st.caption("Click a stock name to open its Individual Stock analysis.")
+    render_holdings_grid(core, 'CORE')
     render_totals_bar(core, '#1F77B4')
 
 elif page == "Satellite Holdings":
     st.subheader("🚀 Satellite Holdings")
     sat = portfolio_df[(portfolio_df['Type'] == 'SATELLITE') & (portfolio_df['Units'] > 0)].drop(columns=['Type']).reset_index(drop=True)
     sat.index = sat.index + 1
-    st.dataframe(sat.style.format(FORMAT_DICT), use_container_width=True)
+    st.caption("Click a stock name to open its Individual Stock analysis.")
+    render_holdings_grid(sat, 'SATELLITE')
     render_totals_bar(sat, '#D62728')
 
 elif page == "Profit/Loss":
@@ -491,7 +530,10 @@ elif page == "Individual Stock":
         for _, r in all_pos.iterrows():
             label = f"{r['Type']} — {r['Stock']}" + ("" if r['Open'] else "  (closed)")
             options[label] = (r['Type'], r['Stock'])
-        choice = st.selectbox("Select a stock (open positions first, then closed)", list(options.keys()))
+        if st.session_state.get("ind_stock_choice") not in options:
+            st.session_state.pop("ind_stock_choice", None)
+        choice = st.selectbox("Select a stock (open positions first, then closed)", list(options.keys()),
+                              key="ind_stock_choice")
         sel_type, sel_stock = options[choice]
 
         fifo_df = build_fifo_calc_table(processed_trades, sel_type, sel_stock)
