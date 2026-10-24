@@ -101,7 +101,7 @@ def compute_portfolio(df, overrides_df):
         return pd.DataFrame(), pd.DataFrame()
 
     df['Date of Trxn'] = pd.to_datetime(df['Date of Trxn'])
-    df = df.sort_values(by='Date of Trxn').copy()
+    df = df.sort_values(by='Date of Trxn', kind='stable').copy()
 
     unique_tickers = df['Stock'].unique().tolist()
     live_prices = fetch_live_prices(unique_tickers, overrides_df)
@@ -337,6 +337,61 @@ def render_compact_table(headers, rows, left_cols=(), auto_width=False):
         unsafe_allow_html=True
     )
 
+def fmt_date(d):
+    return f"{d.day}-{d.strftime('%b-%Y')}"
+
+def build_closed_lots_table(df, ptype, stock):
+    """Every sale matched FIFO against the buy lots it consumed, one row per matched piece.
+    'Cycle' counts rounds of buying: it goes up when the stock is bought again after the
+    position had been fully squared off."""
+    sub = df[(df['TYPE'].str.strip().str.upper() == ptype) &
+             (df['Stock'].str.strip().str.upper() == stock)].copy()
+    sub['Date of Trxn'] = pd.to_datetime(sub['Date of Trxn'])
+    sub = sub.sort_values(by='Date of Trxn', kind='stable')
+
+    lots = []   # {date, price, remaining}
+    rows = []
+    cycle = 1
+    net = 0.0
+    flat_after_sell = False
+    for _, row in sub.iterrows():
+        qty = float(row['Unit'])
+        price = float(row['Price'])
+        if qty >= 0:
+            if flat_after_sell:
+                cycle += 1
+                flat_after_sell = False
+            lots.append({'date': row['Date of Trxn'], 'price': price, 'remaining': qty})
+            net += qty
+        else:
+            to_sell = abs(qty)
+            for lot in lots:
+                if to_sell <= 0:
+                    break
+                if lot['remaining'] <= 0:
+                    continue
+                consume = min(lot['remaining'], to_sell)
+                invested = consume * lot['price']
+                proceeds = consume * price
+                rows.append({
+                    'Cycle': cycle,
+                    'Buy Date': lot['date'], 'Buy Price': lot['price'],
+                    'Sell Date': row['Date of Trxn'], 'Sell Price': price,
+                    'Qty': consume, 'Invested': invested, 'Proceeds': proceeds,
+                    'Realized P/L': proceeds - invested,
+                    'Return %': (proceeds - invested) / invested if invested else None,
+                    'Days Held': (row['Date of Trxn'] - lot['date']).days,
+                })
+                lot['remaining'] -= consume
+                to_sell -= consume
+            net += qty
+            if net <= 1e-9:
+                flat_after_sell = True
+    out = pd.DataFrame(rows)
+    if not out.empty:
+        out = out.sort_values(['Sell Date', 'Buy Date'], ascending=False, kind='stable').reset_index(drop=True)
+    return out
+
 # --- NAVIGATION SIDEBAR ---
 st.sidebar.title("📌 Menu")
 page = st.sidebar.radio("Go to", ["Dashboard Overview", "Core Holdings", "Satellite Holdings",
@@ -424,21 +479,26 @@ elif page == "Profit/Loss":
 
 elif page == "Individual Stock":
     st.subheader("🔍 Individual Stock Analysis")
+    GREEN, RED = "#1B8A3A", "#C62828"
 
-    open_positions = portfolio_df[portfolio_df['Units'] > 0].copy()
-    if open_positions.empty:
-        st.info("No open positions to analyze.")
+    if portfolio_df.empty:
+        st.info("No positions to analyze.")
     else:
-        open_positions['Label'] = open_positions['Type'] + " — " + open_positions['Stock']
-        choice = st.selectbox("Select a stock", open_positions['Label'].tolist())
-        sel_type, sel_stock = choice.split(" — ")
+        all_pos = portfolio_df.copy()
+        all_pos['Open'] = all_pos['Units'] > 0
+        all_pos = all_pos.sort_values(['Open', 'Stock'], ascending=[False, True])
+        options = {}
+        for _, r in all_pos.iterrows():
+            label = f"{r['Type']} — {r['Stock']}" + ("" if r['Open'] else "  (closed)")
+            options[label] = (r['Type'], r['Stock'])
+        choice = st.selectbox("Select a stock (open positions first, then closed)", list(options.keys()))
+        sel_type, sel_stock = options[choice]
 
         fifo_df = build_fifo_calc_table(processed_trades, sel_type, sel_stock)
         fifo_rows = []
         for _, r in fifo_df.iterrows():
             fifo_rows.append([
-                (r['Type'], None), (r['Stock'], None),
-                (f"{r['Buy_Date'].day}-{r['Buy_Date'].strftime('%b-%Y')}", None),
+                (r['Type'], None), (r['Stock'], None), (fmt_date(r['Buy_Date']), None),
                 (fmt_num(r['Buy_Price']), None), (fmt_num(r['Buy_Qty'], 0), None),
                 (fmt_num(r['Cum_Buy'], 0), None), (fmt_num(r['Cum_Sold'], 0), None),
                 (fmt_num(r['Depleted'], 0), None), (fmt_num(r['Rem_Qty'], 0), None),
@@ -451,11 +511,11 @@ elif page == "Individual Stock":
         )
 
         lots = get_remaining_lots(processed_trades, sel_type, sel_stock)
-        cmp_row = open_positions[(open_positions['Type'] == sel_type) & (open_positions['Stock'] == sel_stock)]
-        cmp_price = float(cmp_row['CMP'].iloc[0])
+        pos_row = all_pos[(all_pos['Type'] == sel_type) & (all_pos['Stock'] == sel_stock)].iloc[0]
+        cmp_price = float(pos_row['CMP'])
 
         if not lots:
-            st.warning("No open tranches found for this stock.")
+            st.info("No open position — this stock is fully squared off. Its realized results are below.")
         else:
             tranche_df = build_tranche_table(lots, cmp_price)
 
@@ -475,8 +535,7 @@ elif page == "Individual Stock":
             c4.metric("Current Stop-Loss", f"₹{current_sl_price:,.2f}",
                       delta=f"Risk ₹{current_risk:,.2f}" if current_risk > 0 else "Risk-free (breakeven)")
 
-            st.markdown("#### Tranche Breakdown & Stop-Loss")
-            GREEN, RED = "#1B8A3A", "#C62828"
+            st.markdown("#### Tranche Breakdown & Stop-Loss (open position)")
             t_rows = []
             for _, r in tranche_df.iterrows():
                 gp, gc = r['Growth % vs Prev Tranche'], r['Growth % vs CMP']
@@ -525,6 +584,44 @@ elif page == "Individual Stock":
                     "Position is risk-free — stop-loss is at or above breakeven.</p>",
                     unsafe_allow_html=True
                 )
+
+        st.markdown("#### Closed Positions — Realized P/L")
+        closed_df = build_closed_lots_table(processed_trades, sel_type, sel_stock)
+        if closed_df.empty:
+            st.caption("No shares have been sold yet for this stock.")
+        else:
+            c_rows = []
+            for _, r in closed_df.iterrows():
+                pl, ret = r['Realized P/L'], r['Return %']
+                col = GREEN if pl >= 0 else RED
+                c_rows.append([
+                    (int(r['Cycle']), None),
+                    (fmt_date(r['Buy Date']), None), (fmt_num(r['Buy Price']), None),
+                    (fmt_date(r['Sell Date']), None), (fmt_num(r['Sell Price']), None),
+                    (fmt_num(r['Qty'], 0), None),
+                    (fmt_num(r['Invested'], 0), None), (fmt_num(r['Proceeds'], 0), None),
+                    (fmt_num(pl, 0), col),
+                    ("—" if pd.isna(ret) else f"{ret:.1%}", col),
+                    (int(r['Days Held']), None),
+                ])
+            render_compact_table(
+                ['Cycle', 'Buy Date', 'Buy ₹', 'Sell Date', 'Sell ₹', 'Qty',
+                 'Invested ₹', 'Proceeds ₹', 'Realized P/L ₹', 'Return', 'Days'],
+                c_rows, left_cols=(1, 3)
+            )
+            st.caption("Each row is a sale matched FIFO to the buy lot it closed. Cycle 2, 3… means the stock "
+                       "was bought again after the earlier position was fully squared off.")
+            tot_pl = closed_df['Realized P/L'].sum()
+            tot_inv = closed_df['Invested'].sum()
+            tot_col = GREEN if tot_pl >= 0 else RED
+            st.markdown(
+                f"<p style='font-size:20px; font-weight:800; color:{tot_col};'>"
+                f"Total Realized P/L: ₹{tot_pl:,.2f} "
+                f"<span style='font-size:14px; font-weight:400;'>"
+                f"({len(closed_df)} closed lot{'s' if len(closed_df) != 1 else ''}, {(tot_pl / tot_inv if tot_inv else 0):.1%} on ₹{tot_inv:,.0f} invested)"
+                f"</span></p>",
+                unsafe_allow_html=True
+            )
 
 elif page == "Trade Book":
     st.subheader("📒 Trade Book")
