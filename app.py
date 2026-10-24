@@ -3,6 +3,7 @@ import pandas as pd
 import yfinance as yf
 from datetime import datetime
 import os
+import html as html_lib
 
 st.set_page_config(page_title="Equity Portfolio Dashboard", layout="wide", initial_sidebar_state="expanded")
 
@@ -224,13 +225,13 @@ def build_tranche_table(lots, cmp_price):
         weighted_avg = cum_investment / cum_qty if cum_qty > 0 else 0.0
 
         if tranche_no == 1:
-            sl_rule = "10% below buy price"
+            sl_rule = "10% below buy"
             sl_price = price * 0.90
         elif tranche_no == 2:
-            sl_rule = "Residual (same ₹ risk as Tranche 1)"
+            sl_rule = "Residual risk"
             sl_price = weighted_avg - (prev_risk_amount / cum_qty)
         else:
-            sl_rule = "Breakeven (all tranches)"
+            sl_rule = "Breakeven"
             sl_price = weighted_avg
 
         risk_amount = (weighted_avg - sl_price) * cum_qty
@@ -259,6 +260,82 @@ def build_tranche_table(lots, cmp_price):
         prev_risk_amount = risk_amount
 
     return pd.DataFrame(rows)
+
+def build_fifo_calc_table(df, ptype, stock):
+    """FIFO_Calc-style listing for one (Type, Stock): every transaction, newest first.
+    Cum_Buy runs from the top row down; Cum_Sold is total ever sold; Depleted is how much
+    of a buy lot has been consumed by FIFO-matched sales."""
+    sub = df[(df['TYPE'].str.strip().str.upper() == ptype) &
+             (df['Stock'].str.strip().str.upper() == stock)].copy()
+    sub['Date of Trxn'] = pd.to_datetime(sub['Date of Trxn'])
+    sub = sub.sort_values(by='Date of Trxn', kind='stable').reset_index(drop=True)
+
+    depleted = [0.0] * len(sub)
+    lots = []  # {i, remaining}
+    for i, row in sub.iterrows():
+        qty = float(row['Unit'])
+        if qty >= 0:
+            lots.append({'i': i, 'remaining': qty})
+        else:
+            to_sell = abs(qty)
+            for lot in lots:
+                if to_sell <= 0:
+                    break
+                if lot['remaining'] <= 0:
+                    continue
+                consume = min(lot['remaining'], to_sell)
+                lot['remaining'] -= consume
+                depleted[lot['i']] += consume
+                to_sell -= consume
+
+    total_sold = abs(sub.loc[sub['Unit'].astype(float) < 0, 'Unit'].astype(float).sum())
+    rows = []
+    for i, row in sub.iterrows():
+        qty = float(row['Unit'])
+        price = float(row['Price'])
+        dep = 0.0 if qty < 0 else depleted[i]
+        rem = 0.0 if qty < 0 else qty - dep
+        rows.append({
+            'Type': ptype, 'Stock': stock,
+            'Buy_Date': row['Date of Trxn'],
+            'Buy_Price': price, 'Buy_Qty': qty,
+            'Cum_Sold': total_sold, 'Depleted': dep,
+            'Rem_Qty': rem, 'Rem_Value': rem * price,
+        })
+    out = pd.DataFrame(rows).iloc[::-1].reset_index(drop=True)  # newest first
+    out.insert(5, 'Cum_Buy', out['Buy_Qty'].cumsum())
+    return out
+
+def fmt_num(v, decimals=2):
+    s = f"{v:,.{decimals}f}"
+    return s.rstrip('0').rstrip('.') if decimals > 0 and '.' in s else s
+
+def render_compact_table(headers, rows, left_cols=(), auto_width=False):
+    """Small-font HTML table that fits in one view. rows = list of lists of
+    (text, css_color_or_None). Works in light and dark themes."""
+    css = ("<style>"
+           ".cmp-wrap{overflow-x:auto;}"
+           "table.cmp{border-collapse:collapse;font-size:12px;line-height:1.25;}"
+           "table.cmp th,table.cmp td{padding:3px 7px;white-space:nowrap;text-align:right;"
+           "border-bottom:1px solid rgba(128,128,128,0.30);}"
+           "table.cmp th{background:rgba(128,128,128,0.18);font-weight:700;text-align:center;}"
+           "table.cmp td.l{text-align:left;}"
+           "</style>")
+    width = "width:auto;" if auto_width else "width:100%;"
+    head = "".join(f"<th>{html_lib.escape(h)}</th>" for h in headers)
+    body = ""
+    for r in rows:
+        tds = ""
+        for ci, (text, color) in enumerate(r):
+            cls = " class='l'" if ci in left_cols else ""
+            style = f" style='color:{color}; font-weight:600;'" if color else ""
+            tds += f"<td{cls}{style}>{html_lib.escape(str(text))}</td>"
+        body += f"<tr>{tds}</tr>"
+    st.markdown(
+        f"{css}<div class='cmp-wrap'><table class='cmp' style='{width}'>"
+        f"<thead><tr>{head}</tr></thead><tbody>{body}</tbody></table></div>",
+        unsafe_allow_html=True
+    )
 
 # --- NAVIGATION SIDEBAR ---
 st.sidebar.title("📌 Menu")
@@ -356,6 +433,23 @@ elif page == "Individual Stock":
         choice = st.selectbox("Select a stock", open_positions['Label'].tolist())
         sel_type, sel_stock = choice.split(" — ")
 
+        fifo_df = build_fifo_calc_table(processed_trades, sel_type, sel_stock)
+        fifo_rows = []
+        for _, r in fifo_df.iterrows():
+            fifo_rows.append([
+                (r['Type'], None), (r['Stock'], None),
+                (f"{r['Buy_Date'].day}-{r['Buy_Date'].strftime('%b-%Y')}", None),
+                (fmt_num(r['Buy_Price']), None), (fmt_num(r['Buy_Qty'], 0), None),
+                (fmt_num(r['Cum_Buy'], 0), None), (fmt_num(r['Cum_Sold'], 0), None),
+                (fmt_num(r['Depleted'], 0), None), (fmt_num(r['Rem_Qty'], 0), None),
+                (fmt_num(r['Rem_Value']), None),
+            ])
+        render_compact_table(
+            ['Type', 'Stock', 'Buy_Date', 'Buy_Price', 'Buy_Qty', 'Cum_Buy',
+             'Cum_Sold', 'Depleted', 'Rem_Qty', 'Rem_Value'],
+            fifo_rows, left_cols=(0, 1), auto_width=True
+        )
+
         lots = get_remaining_lots(processed_trades, sel_type, sel_stock)
         cmp_row = open_positions[(open_positions['Type'] == sel_type) & (open_positions['Stock'] == sel_stock)]
         cmp_price = float(cmp_row['CMP'].iloc[0])
@@ -382,25 +476,38 @@ elif page == "Individual Stock":
                       delta=f"Risk ₹{current_risk:,.2f}" if current_risk > 0 else "Risk-free (breakeven)")
 
             st.markdown("#### Tranche Breakdown & Stop-Loss")
-            display_df = tranche_df.copy()
-            display_df.index = display_df.index + 1
-            st.dataframe(
-                display_df.style.format({
-                    'Buy Price': '₹{:.2f}', 'Investment': '₹{:.2f}', 'Weighted Avg Cost': '₹{:.2f}',
-                    'Growth % vs Prev Tranche': lambda v: f'{v:.1%}' if pd.notna(v) else '—',
-                    'Growth % vs CMP': lambda v: f'{v:.1%}' if pd.notna(v) else '—',
-                    'Stop-Loss Price': '₹{:.2f}', 'Risk Amount (₹)': '₹{:.2f}', 'Tranche P/L (₹)': '₹{:.2f}',
-                }),
-                use_container_width=True
+            GREEN, RED = "#1B8A3A", "#C62828"
+            t_rows = []
+            for _, r in tranche_df.iterrows():
+                gp, gc = r['Growth % vs Prev Tranche'], r['Growth % vs CMP']
+                pl = r['Tranche P/L (₹)']
+                t_rows.append([
+                    (int(r['Tranche']), None), (r['Buy Date'], None),
+                    (fmt_num(r['Buy Price']), None), (fmt_num(r['Qty'], 0), None),
+                    (fmt_num(r['Investment'], 0), None), (fmt_num(r['Cum. Qty'], 0), None),
+                    (fmt_num(r['Weighted Avg Cost']), None),
+                    ("—" if pd.isna(gp) else f"{gp:.1%}", None),
+                    ("—" if pd.isna(gc) else f"{gc:.1%}", GREEN if gc >= 0 else RED),
+                    (r['Stop-Loss Rule'], None),
+                    (fmt_num(r['Stop-Loss Price']), None),
+                    (fmt_num(r['Risk Amount (₹)'], 0), None),
+                    (fmt_num(pl, 0), GREEN if pl >= 0 else RED),
+                ])
+            render_compact_table(
+                ['#', 'Date', 'Buy ₹', 'Qty', 'Invested ₹', 'Cum Qty', 'Avg Cost ₹',
+                 'Δ vs Prev', 'Δ vs CMP', 'SL Rule', 'SL ₹', 'Risk ₹', 'P/L ₹'],
+                t_rows, left_cols=(1, 9)
             )
+            st.caption("SL rule: Tranche 1 = 10% below its buy price · Tranche 2 = same ₹ risk as "
+                       "Tranche 1 · Tranche 3+ = breakeven (avg cost of all tranches).")
 
             st.markdown("#### Profit Target Ladder")
-            targets = []
-            for pct in [10, 15, 20, 25]:
-                target_price = weighted_avg * (1 + pct / 100)
-                targets.append({'Profit Target': f'{pct}% on total investment', 'Target Price': target_price})
-            target_df = pd.DataFrame(targets)
-            st.dataframe(target_df.style.format({'Target Price': '₹{:.2f}'}), use_container_width=True, hide_index=True)
+            pcts = [10, 15, 20, 25]
+            render_compact_table(
+                ['Profit target'] + [f"+{p}%" for p in pcts],
+                [[("Target price ₹", None)] + [(fmt_num(weighted_avg * (1 + p / 100)), None) for p in pcts]],
+                left_cols=(0,), auto_width=True
+            )
 
             st.markdown("#### Risk : Reward")
             reward_15pct = total_investment * 0.15
