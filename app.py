@@ -4,8 +4,26 @@ import yfinance as yf
 from datetime import datetime
 import os
 import html as html_lib
+import re
 
-st.set_page_config(page_title="Equity Portfolio Dashboard", layout="wide", initial_sidebar_state="expanded")
+def detect_mobile():
+    """Phone detection from the browser's User-Agent. Add ?view=mobile or ?view=desktop
+    to the web address to force a layout."""
+    try:
+        forced = st.query_params.get("view")
+        if forced == "mobile":
+            return True
+        if forced == "desktop":
+            return False
+        ua = st.context.headers.get("User-Agent", "") or ""
+        return bool(re.search(r"Mobile|Android|iPhone|iPod", ua, re.I))
+    except Exception:
+        return False
+
+IS_MOBILE = detect_mobile()
+
+st.set_page_config(page_title="Equity Portfolio Dashboard", layout="wide",
+                   initial_sidebar_state="collapsed" if IS_MOBILE else "expanded")
 
 EXCEL_FILE = "Equity_Portfolio_Dashboard.xlsx"
 PASSWORD = os.environ.get("PORTFOLIO_PASSWORD", "admin")  # override via env var in production
@@ -29,6 +47,31 @@ def check_password():
 
 if not check_password():
     st.stop()
+
+st.markdown(
+    "<style>"
+    ".kpi-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;margin:4px 0 8px 0;}"
+    ".kpi-grid.sm{grid-template-columns:repeat(auto-fit,minmax(105px,1fr));}"
+    ".kpi{border:1px solid rgba(128,128,128,.30);border-radius:10px;padding:8px 10px;}"
+    ".kpi-l{font-size:12px;opacity:.7;}"
+    ".kpi-v{font-size:1.2rem;font-weight:700;line-height:1.3;}"
+    ".kpi-s{font-size:12px;font-weight:600;}"
+    ".mc{border:1px solid rgba(128,128,128,.35);border-radius:10px;padding:8px 10px;margin:6px 0;}"
+    ".mc.tot{border-width:2px;}"
+    ".mc-h{display:flex;justify-content:space-between;align-items:baseline;font-weight:700;font-size:15px;}"
+    ".mc-h small{font-weight:600;opacity:.75;font-size:11px;margin-left:6px;}"
+    ".mc-g{display:grid;grid-template-columns:1fr 1fr;gap:2px 12px;font-size:12.5px;margin-top:4px;}"
+    ".mc-g span{opacity:.65;}"
+    ".mc-g b{font-weight:600;}"
+    ".cmp-wrap{-webkit-overflow-scrolling:touch;}"
+    "@media (max-width:640px){"
+    ".block-container,[data-testid='stMainBlockContainer']{padding:0.8rem 0.6rem 3rem 0.6rem !important;}"
+    "h2{font-size:1.35rem !important;}h3{font-size:1.2rem !important;}h4{font-size:1.05rem !important;}"
+    "[data-testid='stVerticalBlock']{gap:0.5rem !important;}"
+    "}"
+    "</style>",
+    unsafe_allow_html=True
+)
 
 # --- DATA LOADING AND SAVING ---
 @st.cache_data(ttl=600)
@@ -419,19 +462,75 @@ def build_closed_lots_table(df, ptype, stock):
         out = out.sort_values(['Sell Date', 'Buy Date'], ascending=False, kind='stable').reset_index(drop=True)
     return out
 
-# --- NAVIGATION SIDEBAR ---
-st.sidebar.title("📌 Menu")
-page = st.sidebar.radio("Go to", ["Dashboard Overview", "Core Holdings", "Satellite Holdings",
-                                    "Profit/Loss", "Individual Stock", "Trade Book", "Add Trade", "CMP Overrides"],
-                        key="nav_page")
+UP, DOWN = "#1B8A3A", "#C62828"
 
-if st.sidebar.button("Logout"):
+def money(v, dec=2):
+    if v is None or pd.isna(v):
+        return "-"
+    return f"{'-' if v < 0 else ''}₹{abs(v):,.{dec}f}"
+
+def pl_color(v):
+    if v is None or pd.isna(v) or v == 0:
+        return None
+    return UP if v > 0 else DOWN
+
+def esc(x):
+    return html_lib.escape(str(x))
+
+def kpi_grid(items, small=False):
+    """items: (label, value, sub_text_or_None, sub_color_or_None). Wraps to 2 per row on phones."""
+    cells = ""
+    for label, value, sub, sub_color, *rest in items:
+        value_color = rest[0] if rest else None
+        sub_html = f"<div class='kpi-s' style='color:{sub_color or 'inherit'};'>{esc(sub)}</div>" if sub else ""
+        cells += (f"<div class='kpi'><div class='kpi-l'>{esc(label)}</div>"
+                  f"<div class='kpi-v' style='color:{value_color or 'inherit'};'>{esc(value)}</div>{sub_html}</div>")
+    st.markdown(f"<div class='kpi-grid{' sm' if small else ''}'>{cells}</div>", unsafe_allow_html=True)
+
+def card_html(title=None, right=None, right_color=None, items=(), badge=None, total=False):
+    """One mobile card: optional header (title left, headline value right) + a 2-column grid of
+    label/value pairs. items: (label, value, color_or_None)."""
+    head = ""
+    if title is not None:
+        badge_html = f"<small>{esc(badge)}</small>" if badge else ""
+        head = (f"<div class='mc-h'><div>{esc(title)}{badge_html}</div>"
+                f"<div style='color:{right_color or 'inherit'};'>{esc(right if right is not None else '')}</div></div>")
+    grid = ""
+    for label, value, color in items:
+        st_attr = f" style='color:{color};'" if color else ""
+        grid += f"<div><span>{esc(label)}</span> <b{st_attr}>{esc(value)}</b></div>"
+    grid_html = f"<div class='mc-g'>{grid}</div>" if grid else ""
+    return f"<div class='mc{' tot' if total else ''}'>{head}{grid_html}</div>"
+
+def render_cards(cards):
+    st.markdown("".join(cards), unsafe_allow_html=True)
+
+# --- NAVIGATION ---
+PAGES = ["Dashboard Overview", "Core Holdings", "Satellite Holdings",
+         "Profit/Loss", "Individual Stock", "Trade Book", "Add Trade", "CMP Overrides"]
+
+def do_logout():
     st.session_state["authenticated"] = False
-    st.rerun()
 
-if st.sidebar.button("🔄 Refresh Prices"):
+def do_refresh():
     st.cache_data.clear()
-    st.rerun()
+
+if IS_MOBILE:
+    page = st.selectbox("Menu", PAGES, key="nav_page", label_visibility="collapsed")
+    with st.expander("⚙️ Options"):
+        st.button("🔄 Refresh Prices", on_click=do_refresh, use_container_width=True)
+        st.button("Logout", on_click=do_logout, use_container_width=True)
+else:
+    st.sidebar.title("📌 Menu")
+    page = st.sidebar.radio("Go to", PAGES, key="nav_page")
+
+    if st.sidebar.button("Logout"):
+        st.session_state["authenticated"] = False
+        st.rerun()
+
+    if st.sidebar.button("🔄 Refresh Prices"):
+        st.cache_data.clear()
+        st.rerun()
 
 # --- KPI METRICS CARDS ---
 if not portfolio_df.empty:
@@ -441,11 +540,13 @@ if not portfolio_df.empty:
     unrealized_pl = curr_holdings['Unrealized_PL'].sum()
     realized_pl = portfolio_df['Realized_PL'].sum()
 
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Current Value", f"₹{total_val:,.2f}")
-    col2.metric("Total Invested", f"₹{total_cost:,.2f}")
-    col3.metric("Unrealized P&L", f"₹{unrealized_pl:,.2f}", delta=f"{(unrealized_pl/total_cost*100) if total_cost>0 else 0:.2f}%")
-    col4.metric("Realized P&L", f"₹{realized_pl:,.2f}")
+    unreal_pct = (unrealized_pl / total_cost * 100) if total_cost > 0 else 0
+    kpi_grid([
+        ("Current Value", money(total_val), None, None),
+        ("Total Invested", money(total_cost), None, None),
+        ("Unrealized P&L", money(unrealized_pl), f"{unreal_pct:+.2f}%", pl_color(unrealized_pl)),
+        ("Realized P&L", money(realized_pl), None, None),
+    ])
 
 st.markdown("---")
 
@@ -486,7 +587,20 @@ def go_to_stock(label):
     st.session_state["ind_stock_choice"] = label
 
 def render_holdings_grid(df, ptype):
-    """Holdings table whose Stock names are clickable links to the Individual Stock page."""
+    """Holdings table whose Stock names are clickable links to the Individual Stock page.
+    On a phone it becomes one tappable stock link + a small card per holding."""
+    if IS_MOBILE:
+        for i, (_, r) in enumerate(df.iterrows(), start=1):
+            st.button(f"{i}.  {r['Stock']}", key=f"hold_{ptype}_{i}_{r['Stock']}", type="tertiary",
+                      on_click=go_to_stock, args=(f"{ptype} — {r['Stock']}",))
+            render_cards([card_html(items=[
+                ("CMP", money(r['CMP']), None), ("Units", f"{int(r['Units']):,}", None),
+                ("Avg", money(r['Avg_Cost']), None), ("Invested", money(r['Total_Cost']), None),
+                ("Value", money(r['Total_Value']), None), ("Unrealized", money(r['Unrealized_PL']), pl_color(r['Unrealized_PL'])),
+                ("Realized", money(r['Realized_PL']), None), ("Net gain", money(r['Total_Net_Gain']), None),
+                ("Alloc", f"{r['Allocation_%']:.1%}", None),
+            ])])
+        return
     heads = ['#', 'Stock', 'Units', 'Avg Cost', 'Total Cost', 'CMP', 'Total Value',
              'Unrealized P/L', 'Realized P/L', 'Net Gain', 'Alloc %']
     widths = [0.5, 1.8, 0.8, 1.2, 1.3, 1.1, 1.4, 1.4, 1.3, 1.3, 0.9]
@@ -516,18 +630,6 @@ def render_holdings_grid(df, ptype):
         cell(cols[9], f"₹{r['Total_Net_Gain']:,.2f}")
         cell(cols[10], f"{r['Allocation_%']:.1%}")
 
-UP, DOWN = "#1B8A3A", "#C62828"
-
-def money(v, dec=2):
-    if v is None or pd.isna(v):
-        return "-"
-    return f"{'-' if v < 0 else ''}₹{abs(v):,.{dec}f}"
-
-def pl_color(v):
-    if v is None or pd.isna(v) or v == 0:
-        return None
-    return UP if v > 0 else DOWN
-
 def day_change_total(df):
     s = df['Day_Change']
     return s.sum() if s.notna().any() else float('nan')
@@ -538,11 +640,19 @@ def render_overview_open(title, df):
         st.caption("No open positions.")
         return
     rows = []
+    cards = []
     for i, (_, r) in enumerate(df.iterrows(), start=1):
         # CMP is coloured by today's move: above yesterday's close = green, below = red
         cmp_color = None
         if pd.notna(r['Yest_Close']) and r['CMP'] > 0 and r['CMP'] != r['Yest_Close']:
             cmp_color = UP if r['CMP'] > r['Yest_Close'] else DOWN
+        cards.append(card_html(
+            title=f"{i}. {r['Stock']}", right=money(r['CMP']), right_color=cmp_color,
+            items=[("Units", f"{int(r['Units']):,}", None), ("Avg", money(r['Avg_Cost']), None),
+                   ("Yest", money(r['Yest_Close']), None), ("1 Day", money(r['Day_Change']), pl_color(r['Day_Change'])),
+                   ("Invested", money(r['Total_Cost']), None), ("Value", money(r['Total_Value']), None),
+                   ("Unrealized", money(r['Unrealized_PL']), None), ("Realized", money(r['Realized_PL']), None),
+                   ("Net gain", money(r['Total_Net_Gain']), None), ("Alloc", f"{r['Allocation_%']:.1%}", None)]))
         rows.append([
             (i, None), (r['Stock'], None), (f"{int(r['Units']):,}", None),
             (money(r['Avg_Cost']), None), (money(r['Total_Cost']), None),
@@ -553,6 +663,10 @@ def render_overview_open(title, df):
             (f"{r['Allocation_%']:.1%}", None),
         ])
     tot = day_change_total(df)
+    if IS_MOBILE:
+        cards.append(card_html(title="Total 1_Day_Change", right=money(tot), right_color=pl_color(tot), total=True))
+        render_cards(cards)
+        return
     rows.append([("", None), ("Total", None)] + [("", None)] * 5 + [(money(tot), pl_color(tot))] + [("", None)] * 5)
     render_compact_table(
         ['#', 'Stock', 'Units', 'Avg_Cost', 'Total_Cost', 'CMP', 'Yest_Close', '1_Day_Change',
@@ -564,11 +678,11 @@ def render_day_change_summary(core_df, sat_df):
     core_t, sat_t = day_change_total(core_df), day_change_total(sat_df)
     both = [x for x in (core_t, sat_t) if pd.notna(x)]
     grand = sum(both) if both else float('nan')
-    render_compact_table(
-        ['Core 1_Day_Change', 'Satellite 1_Day_Change', 'Total 1_Day_Change'],
-        [[(money(core_t), pl_color(core_t)), (money(sat_t), pl_color(sat_t)), (money(grand), pl_color(grand))]],
-        auto_width=True, font_px=14
-    )
+    kpi_grid([
+        ("Core 1_Day_Change", money(core_t), None, None, pl_color(core_t)),
+        ("Satellite 1_Day_Change", money(sat_t), None, None, pl_color(sat_t)),
+        ("Total 1_Day_Change", money(grand), None, None, pl_color(grand)),
+    ], small=True)
 
 def render_overview_booked(title, df, trades):
     """P/L booked = every stock with at least one sale: fully squared off and partially sold."""
@@ -586,11 +700,32 @@ def render_overview_booked(title, df, trades):
             'Ret': (pl / cost) if cost else float('nan'),
             'Last_Sale': lots['Sell Date'].max(),
         })
-    st.markdown(f"#### {title} ({len(rows_data)})")
     if not rows_data:
+        st.markdown(f"#### {title} (0)")
         st.caption("No sales booked yet.")
         return
     rows_data.sort(key=lambda d: d['Last_Sale'], reverse=True)
+    if IS_MOBILE:
+        t_cost = sum(d['Cost'] for d in rows_data)
+        t_proc = sum(d['Proceeds'] for d in rows_data)
+        t_pl = sum(d['PL'] for d in rows_data)
+        cards = []
+        for i, d in enumerate(rows_data, start=1):
+            c = pl_color(d['PL'])
+            cards.append(card_html(
+                title=f"{i}. {d['Stock']}", badge=d['Status'], right=money(d['PL']), right_color=c,
+                items=[("Qty sold", f"{d['Qty_Sold']:,.0f}", None), ("Units left", f"{d['Units_Left']:,}", None),
+                       ("Cost", money(d['Cost']), None), ("Proceeds", money(d['Proceeds']), None),
+                       ("Return", "-" if pd.isna(d['Ret']) else f"{d['Ret']:.1%}", c),
+                       ("Last sale", fmt_date(d['Last_Sale']), None)]))
+        cards.append(card_html(
+            title="Total", right=money(t_pl), right_color=pl_color(t_pl), total=True,
+            items=[("Cost", money(t_cost), None), ("Proceeds", money(t_proc), None),
+                   ("Return", f"{t_pl / t_cost:.1%}" if t_cost else "-", pl_color(t_pl))]))
+        with st.expander(f"{title} ({len(rows_data)})  ·  {money(t_pl)}", expanded=False):
+            render_cards(cards)
+        return
+    st.markdown(f"#### {title} ({len(rows_data)})")
     rows = []
     for i, d in enumerate(rows_data, start=1):
         c = pl_color(d['PL'])
@@ -646,8 +781,12 @@ elif page == "Satellite Holdings":
 elif page == "Profit/Loss":
     st.subheader("🔻 Booked Losses & Closed Positions")
     closed = portfolio_df[(portfolio_df['Units'] == 0) & (portfolio_df['Realized_PL'] < 0)]
-    st.dataframe(closed.drop(columns=['Yest_Close', 'Day_Change']).style.format(FORMAT_DICT),
-                 use_container_width=True)
+    if IS_MOBILE:
+        st.dataframe(closed[['Stock', 'Type', 'Realized_PL']].style.format(FORMAT_DICT),
+                     use_container_width=True, hide_index=True)
+    else:
+        st.dataframe(closed.drop(columns=['Yest_Close', 'Day_Change']).style.format(FORMAT_DICT),
+                     use_container_width=True)
 
 elif page == "Individual Stock":
     st.subheader("🔍 Individual Stock Analysis")
@@ -685,6 +824,9 @@ elif page == "Individual Stock":
             fifo_rows, left_cols=(0, 1), auto_width=True
         )
 
+        if IS_MOBILE:
+            st.caption("↔ Swipe a table sideways to see all its columns.")
+
         lots = get_remaining_lots(processed_trades, sel_type, sel_stock)
         pos_row = all_pos[(all_pos['Type'] == sel_type) & (all_pos['Stock'] == sel_stock)].iloc[0]
         cmp_price = float(pos_row['CMP'])
@@ -703,12 +845,14 @@ elif page == "Individual Stock":
             current_pl = current_val - total_investment
             current_pl_pct = (current_pl / total_investment) if total_investment > 0 else 0
 
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("CMP", f"₹{cmp_price:,.2f}")
-            c2.metric("Weighted Avg Cost", f"₹{weighted_avg:,.2f}")
-            c3.metric("Unrealized P&L", f"₹{current_pl:,.2f}", delta=f"{current_pl_pct*100:.2f}%")
-            c4.metric("Current Stop-Loss", f"₹{current_sl_price:,.2f}",
-                      delta=f"Risk ₹{current_risk:,.2f}" if current_risk > 0 else "Risk-free (breakeven)")
+            kpi_grid([
+                ("CMP", money(cmp_price), None, None),
+                ("Weighted Avg Cost", money(weighted_avg), None, None),
+                ("Unrealized P&L", money(current_pl), f"{current_pl_pct*100:+.2f}%", pl_color(current_pl)),
+                ("Current Stop-Loss", money(current_sl_price),
+                 f"Risk ₹{current_risk:,.2f}" if current_risk > 0 else "Risk-free (breakeven)",
+                 DOWN if current_risk > 0 else UP),
+            ])
 
             st.markdown("#### Tranche Breakdown & Stop-Loss (open position)")
             t_rows = []
@@ -822,12 +966,13 @@ elif page == "Trade Book":
             s_cost = held['Total_Cost'].sum()
             s_unreal = held['Unrealized_PL'].sum()
             s_real = pos['Realized_PL'].sum()
-            m1, m2, m3, m4 = st.columns(4)
-            m1.metric("Current Value", f"₹{s_val:,.2f}")
-            m2.metric("Total Invested", f"₹{s_cost:,.2f}")
-            m3.metric("Unrealized P/L", f"₹{s_unreal:,.2f}",
-                      delta=f"{(s_unreal/s_cost*100) if s_cost > 0 else 0:.2f}%")
-            m4.metric("Realized P/L", f"₹{s_real:,.2f}")
+            s_pct = (s_unreal / s_cost * 100) if s_cost > 0 else 0
+            kpi_grid([
+                ("Current Value", money(s_val), None, None),
+                ("Total Invested", money(s_cost), None, None),
+                ("Unrealized P/L", money(s_unreal), f"{s_pct:+.2f}%", pl_color(s_unreal)),
+                ("Realized P/L", money(s_real), None, None),
+            ])
 
         if type_sel != "All":
             tb_view = tb_view[tb_view['TYPE'] == type_sel]
