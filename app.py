@@ -67,33 +67,50 @@ def to_yf_symbol(ticker: str) -> str:
         t = f"{t}.NS"
     return t
 
+def _valid(x):
+    return x is not None and not pd.isna(x)
+
 @st.cache_data(ttl=300)
 def fetch_live_prices(tickers, overrides_df):
+    """Returns (price_map, prev_close_map). prev_close is yesterday's closing price
+    (same idea as GOOGLEFINANCE 'closeyest'); None when it cannot be fetched."""
     price_map = {}
+    prev_map = {}
     manual_map = {}
     if not overrides_df.empty:
         manual_map = dict(zip(overrides_df['Stock'], overrides_df['Manual CMP']))
 
     for ticker in tickers:
-        if ticker in manual_map and pd.notna(manual_map[ticker]):
-            price_map[ticker] = float(manual_map[ticker])
-            continue
-
+        price, prev = None, None
         try:
-            symbol = to_yf_symbol(ticker)
-            stock_data = yf.Ticker(symbol)
-            fast_info = stock_data.fast_info
-            price = fast_info.last_price
+            stock_data = yf.Ticker(to_yf_symbol(ticker))
+            try:
+                fast_info = stock_data.fast_info
+                price = fast_info.last_price
+                prev = getattr(fast_info, 'previous_close', None)
+            except Exception:
+                pass
 
-            if price is None or pd.isna(price):
-                hist = stock_data.history(period="1d")
-                price = hist['Close'].iloc[-1] if not hist.empty else 0.0
-
-            price_map[ticker] = float(price)
+            if not _valid(price) or not _valid(prev):
+                try:
+                    closes = stock_data.history(period="5d")['Close'].dropna()
+                    if not closes.empty:
+                        if not _valid(price):
+                            price = closes.iloc[-1]
+                        if not _valid(prev) and len(closes) >= 2:
+                            prev = closes.iloc[-2]
+                except Exception:
+                    pass
         except Exception:
-            price_map[ticker] = 0.0
+            pass
 
-    return price_map
+        if ticker in manual_map and pd.notna(manual_map[ticker]):
+            price = manual_map[ticker]
+
+        price_map[ticker] = float(price) if _valid(price) else 0.0
+        prev_map[ticker] = float(prev) if _valid(prev) else None
+
+    return price_map, prev_map
 
 # --- FIFO CALCULATOR ENGINE ---
 def compute_portfolio(df, overrides_df):
@@ -104,7 +121,7 @@ def compute_portfolio(df, overrides_df):
     df = df.sort_values(by='Date of Trxn', kind='stable').copy()
 
     unique_tickers = df['Stock'].unique().tolist()
-    live_prices = fetch_live_prices(unique_tickers, overrides_df)
+    live_prices, prev_closes = fetch_live_prices(unique_tickers, overrides_df)
 
     inventory = {}
     realized_pl = {}
@@ -146,6 +163,10 @@ def compute_portfolio(df, overrides_df):
         total_cost = sum(l['qty'] * l['price'] for l in lots)
         avg_cost = (total_cost / units) if units > 0 else 0.0
         cmp = live_prices.get(stk, 0.0)
+        prev_close = prev_closes.get(stk)
+        has_day = units > 0 and prev_close is not None and cmp > 0
+        yest_close = prev_close if units > 0 and prev_close is not None else float('nan')
+        day_change = (cmp - prev_close) * units if has_day else float('nan')
         total_val = units * cmp
         unrealized_pl = total_val - total_cost if units > 0 else 0.0
         r_pl = realized_pl.get(key, 0.0)
@@ -158,6 +179,8 @@ def compute_portfolio(df, overrides_df):
             'Avg_Cost': avg_cost,
             'Total_Cost': total_cost,
             'CMP': cmp,
+            'Yest_Close': yest_close,
+            'Day_Change': day_change,
             'Total_Value': total_val,
             'Unrealized_PL': unrealized_pl,
             'Realized_PL': r_pl,
@@ -426,7 +449,8 @@ st.markdown("---")
 FORMAT_DICT = {
     'Avg_Cost': '₹{:.2f}', 'Total_Cost': '₹{:.2f}', 'CMP': '₹{:.2f}',
     'Total_Value': '₹{:.2f}', 'Unrealized_PL': '₹{:.2f}',
-    'Realized_PL': '₹{:.2f}', 'Total_Net_Gain': '₹{:.2f}', 'Allocation_%': '{:.1%}'
+    'Realized_PL': '₹{:.2f}', 'Total_Net_Gain': '₹{:.2f}', 'Allocation_%': '{:.1%}',
+    'Yest_Close': '₹{:.2f}', 'Day_Change': '₹{:.2f}'
 }
 
 def render_totals_bar(df, color):
@@ -488,12 +512,71 @@ def render_holdings_grid(df, ptype):
         cell(cols[9], f"₹{r['Total_Net_Gain']:,.2f}")
         cell(cols[10], f"{r['Allocation_%']:.1%}")
 
+def _pl_color(col):
+    return ['' if pd.isna(v) else ('color:#1B8A3A; font-weight:600;' if v >= 0 else 'color:#C62828; font-weight:600;')
+            for v in col]
+
+def render_overview_open(title, df):
+    st.markdown(f"#### {title} ({len(df)})")
+    if df.empty:
+        st.caption("No open positions.")
+        return
+    view = df[['Stock', 'Units', 'Avg_Cost', 'Total_Cost', 'CMP', 'Yest_Close', 'Day_Change',
+               'Total_Value', 'Unrealized_PL', 'Realized_PL', 'Total_Net_Gain', 'Allocation_%']].copy()
+    view = view.rename(columns={'Day_Change': '1_Day_Change'}).reset_index(drop=True)
+    view.index = view.index + 1
+    fmt = {k: v for k, v in FORMAT_DICT.items() if k != 'Day_Change'}
+    fmt['1_Day_Change'] = '₹{:,.2f}'
+    st.dataframe(view.style.format(fmt, na_rep='-').apply(_pl_color, subset=['1_Day_Change']),
+                 use_container_width=True)
+
+def render_overview_closed(title, df, trades):
+    st.markdown(f"#### {title} ({len(df)})")
+    if df.empty:
+        st.caption("No squared-off positions.")
+        return
+    t = trades.copy()
+    t['TYPE'] = t['TYPE'].astype(str).str.strip().str.upper()
+    t['Stock'] = t['Stock'].astype(str).str.strip().str.upper()
+    t['Amt'] = t['Price'].astype(float) * t['Unit'].astype(float)
+    rows = []
+    for _, r in df.iterrows():
+        sub = t[(t['TYPE'] == r['Type']) & (t['Stock'] == r['Stock'])]
+        bought = sub.loc[sub['Unit'] > 0, 'Amt'].sum()
+        sold = -sub.loc[sub['Unit'] < 0, 'Amt'].sum()
+        rows.append({
+            'Stock': r['Stock'], 'Total_Bought': bought, 'Total_Sold': sold,
+            'Realized_PL': r['Realized_PL'],
+            'Return_%': (r['Realized_PL'] / bought) if bought else float('nan'),
+            'Exit_Date': pd.to_datetime(sub['Date of Trxn']).max(),
+        })
+    view = pd.DataFrame(rows).sort_values('Exit_Date', ascending=False, kind='stable').reset_index(drop=True)
+    view.index = view.index + 1
+    st.dataframe(
+        view.style.format({'Total_Bought': '₹{:,.2f}', 'Total_Sold': '₹{:,.2f}', 'Realized_PL': '₹{:,.2f}',
+                           'Return_%': '{:.1%}', 'Exit_Date': lambda d: d.strftime('%d-%b-%Y')}, na_rep='-')
+            .apply(_pl_color, subset=['Realized_PL', 'Return_%']),
+        use_container_width=True
+    )
+    total = view['Realized_PL'].sum()
+    col = '#1B8A3A' if total >= 0 else '#C62828'
+    st.markdown(
+        f"<p style='font-size:18px; font-weight:800; color:{col};'>Total Realized P/L: "
+        f"{'-' if total < 0 else ''}₹{abs(total):,.2f}</p>",
+        unsafe_allow_html=True
+    )
+
 if page == "Dashboard Overview":
-    st.subheader("📊 Complete Portfolio Overview")
-    if not portfolio_df.empty:
-        st.dataframe(portfolio_df.style.format(FORMAT_DICT), use_container_width=True)
-    else:
+    st.subheader("📊 Dashboard Overview")
+    if portfolio_df.empty:
         st.info("No trades yet. Add one from the 'Add Trade' page.")
+    else:
+        open_df = portfolio_df[portfolio_df['Units'] > 0]
+        closed_df = portfolio_df[portfolio_df['Units'] == 0]
+        render_overview_open("🎯 Core Holdings", open_df[open_df['Type'] == 'CORE'])
+        render_overview_open("🚀 Satellite Holdings", open_df[open_df['Type'] == 'SATELLITE'])
+        render_overview_closed("✅ Core — Squared Off", closed_df[closed_df['Type'] == 'CORE'], processed_trades)
+        render_overview_closed("✅ Satellite — Squared Off", closed_df[closed_df['Type'] == 'SATELLITE'], processed_trades)
 
 elif page == "Core Holdings":
     st.subheader("🎯 Core Holdings")
@@ -514,7 +597,8 @@ elif page == "Satellite Holdings":
 elif page == "Profit/Loss":
     st.subheader("🔻 Booked Losses & Closed Positions")
     closed = portfolio_df[(portfolio_df['Units'] == 0) & (portfolio_df['Realized_PL'] < 0)]
-    st.dataframe(closed.style.format(FORMAT_DICT), use_container_width=True)
+    st.dataframe(closed.drop(columns=['Yest_Close', 'Day_Change']).style.format(FORMAT_DICT),
+                 use_container_width=True)
 
 elif page == "Individual Stock":
     st.subheader("🔍 Individual Stock Analysis")
