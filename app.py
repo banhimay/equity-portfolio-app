@@ -333,29 +333,33 @@ def fmt_num(v, decimals=2):
     s = f"{v:,.{decimals}f}"
     return s.rstrip('0').rstrip('.') if decimals > 0 and '.' in s else s
 
-def render_compact_table(headers, rows, left_cols=(), auto_width=False):
+def render_compact_table(headers, rows, left_cols=(), auto_width=False, total_last=False, font_px=12):
     """Small-font HTML table that fits in one view. rows = list of lists of
-    (text, css_color_or_None). Works in light and dark themes."""
+    (text, css_color_or_None). total_last=True styles the last row as a total row.
+    Works in light and dark themes."""
     css = ("<style>"
            ".cmp-wrap{overflow-x:auto;}"
-           "table.cmp{border-collapse:collapse;font-size:12px;line-height:1.25;}"
+           "table.cmp{border-collapse:collapse;line-height:1.25;}"
            "table.cmp th,table.cmp td{padding:3px 7px;white-space:nowrap;text-align:right;"
            "border-bottom:1px solid rgba(128,128,128,0.30);}"
            "table.cmp th{background:rgba(128,128,128,0.18);font-weight:700;text-align:center;}"
            "table.cmp td.l{text-align:left;}"
+           "table.cmp tr.tot td{font-weight:800;border-top:2px solid rgba(128,128,128,0.65);"
+           "background:rgba(128,128,128,0.10);}"
            "</style>")
     width = "width:auto;" if auto_width else "width:100%;"
     head = "".join(f"<th>{html_lib.escape(h)}</th>" for h in headers)
     body = ""
-    for r in rows:
+    for ri, r in enumerate(rows):
         tds = ""
         for ci, (text, color) in enumerate(r):
             cls = " class='l'" if ci in left_cols else ""
             style = f" style='color:{color}; font-weight:600;'" if color else ""
             tds += f"<td{cls}{style}>{html_lib.escape(str(text))}</td>"
-        body += f"<tr>{tds}</tr>"
+        tr_cls = " class='tot'" if (total_last and ri == len(rows) - 1) else ""
+        body += f"<tr{tr_cls}>{tds}</tr>"
     st.markdown(
-        f"{css}<div class='cmp-wrap'><table class='cmp' style='{width}'>"
+        f"{css}<div class='cmp-wrap'><table class='cmp' style='{width}font-size:{font_px}px;'>"
         f"<thead><tr>{head}</tr></thead><tbody>{body}</tbody></table></div>",
         unsafe_allow_html=True
     )
@@ -512,58 +516,101 @@ def render_holdings_grid(df, ptype):
         cell(cols[9], f"₹{r['Total_Net_Gain']:,.2f}")
         cell(cols[10], f"{r['Allocation_%']:.1%}")
 
-def _pl_color(col):
-    return ['' if pd.isna(v) else ('color:#1B8A3A; font-weight:600;' if v >= 0 else 'color:#C62828; font-weight:600;')
-            for v in col]
+UP, DOWN = "#1B8A3A", "#C62828"
+
+def money(v, dec=2):
+    if v is None or pd.isna(v):
+        return "-"
+    return f"{'-' if v < 0 else ''}₹{abs(v):,.{dec}f}"
+
+def pl_color(v):
+    if v is None or pd.isna(v) or v == 0:
+        return None
+    return UP if v > 0 else DOWN
+
+def day_change_total(df):
+    s = df['Day_Change']
+    return s.sum() if s.notna().any() else float('nan')
 
 def render_overview_open(title, df):
     st.markdown(f"#### {title} ({len(df)})")
     if df.empty:
         st.caption("No open positions.")
         return
-    view = df[['Stock', 'Units', 'Avg_Cost', 'Total_Cost', 'CMP', 'Yest_Close', 'Day_Change',
-               'Total_Value', 'Unrealized_PL', 'Realized_PL', 'Total_Net_Gain', 'Allocation_%']].copy()
-    view = view.rename(columns={'Day_Change': '1_Day_Change'}).reset_index(drop=True)
-    view.index = view.index + 1
-    fmt = {k: v for k, v in FORMAT_DICT.items() if k != 'Day_Change'}
-    fmt['1_Day_Change'] = '₹{:,.2f}'
-    st.dataframe(view.style.format(fmt, na_rep='-').apply(_pl_color, subset=['1_Day_Change']),
-                 use_container_width=True)
-
-def render_overview_closed(title, df, trades):
-    st.markdown(f"#### {title} ({len(df)})")
-    if df.empty:
-        st.caption("No squared-off positions.")
-        return
-    t = trades.copy()
-    t['TYPE'] = t['TYPE'].astype(str).str.strip().str.upper()
-    t['Stock'] = t['Stock'].astype(str).str.strip().str.upper()
-    t['Amt'] = t['Price'].astype(float) * t['Unit'].astype(float)
     rows = []
-    for _, r in df.iterrows():
-        sub = t[(t['TYPE'] == r['Type']) & (t['Stock'] == r['Stock'])]
-        bought = sub.loc[sub['Unit'] > 0, 'Amt'].sum()
-        sold = -sub.loc[sub['Unit'] < 0, 'Amt'].sum()
-        rows.append({
-            'Stock': r['Stock'], 'Total_Bought': bought, 'Total_Sold': sold,
-            'Realized_PL': r['Realized_PL'],
-            'Return_%': (r['Realized_PL'] / bought) if bought else float('nan'),
-            'Exit_Date': pd.to_datetime(sub['Date of Trxn']).max(),
-        })
-    view = pd.DataFrame(rows).sort_values('Exit_Date', ascending=False, kind='stable').reset_index(drop=True)
-    view.index = view.index + 1
-    st.dataframe(
-        view.style.format({'Total_Bought': '₹{:,.2f}', 'Total_Sold': '₹{:,.2f}', 'Realized_PL': '₹{:,.2f}',
-                           'Return_%': '{:.1%}', 'Exit_Date': lambda d: d.strftime('%d-%b-%Y')}, na_rep='-')
-            .apply(_pl_color, subset=['Realized_PL', 'Return_%']),
-        use_container_width=True
+    for i, (_, r) in enumerate(df.iterrows(), start=1):
+        # CMP is coloured by today's move: above yesterday's close = green, below = red
+        cmp_color = None
+        if pd.notna(r['Yest_Close']) and r['CMP'] > 0 and r['CMP'] != r['Yest_Close']:
+            cmp_color = UP if r['CMP'] > r['Yest_Close'] else DOWN
+        rows.append([
+            (i, None), (r['Stock'], None), (f"{int(r['Units']):,}", None),
+            (money(r['Avg_Cost']), None), (money(r['Total_Cost']), None),
+            (money(r['CMP']), cmp_color), (money(r['Yest_Close']), None),
+            (money(r['Day_Change']), pl_color(r['Day_Change'])),
+            (money(r['Total_Value']), None), (money(r['Unrealized_PL']), None),
+            (money(r['Realized_PL']), None), (money(r['Total_Net_Gain']), None),
+            (f"{r['Allocation_%']:.1%}", None),
+        ])
+    tot = day_change_total(df)
+    rows.append([("", None), ("Total", None)] + [("", None)] * 5 + [(money(tot), pl_color(tot))] + [("", None)] * 5)
+    render_compact_table(
+        ['#', 'Stock', 'Units', 'Avg_Cost', 'Total_Cost', 'CMP', 'Yest_Close', '1_Day_Change',
+         'Total_Value', 'Unrealized_PL', 'Realized_PL', 'Total_Net_Gain', 'Allocation_%'],
+        rows, left_cols=(1,), total_last=True, font_px=13
     )
-    total = view['Realized_PL'].sum()
-    col = '#1B8A3A' if total >= 0 else '#C62828'
-    st.markdown(
-        f"<p style='font-size:18px; font-weight:800; color:{col};'>Total Realized P/L: "
-        f"{'-' if total < 0 else ''}₹{abs(total):,.2f}</p>",
-        unsafe_allow_html=True
+
+def render_day_change_summary(core_df, sat_df):
+    core_t, sat_t = day_change_total(core_df), day_change_total(sat_df)
+    both = [x for x in (core_t, sat_t) if pd.notna(x)]
+    grand = sum(both) if both else float('nan')
+    render_compact_table(
+        ['Core 1_Day_Change', 'Satellite 1_Day_Change', 'Total 1_Day_Change'],
+        [[(money(core_t), pl_color(core_t)), (money(sat_t), pl_color(sat_t)), (money(grand), pl_color(grand))]],
+        auto_width=True, font_px=14
+    )
+
+def render_overview_booked(title, df, trades):
+    """P/L booked = every stock with at least one sale: fully squared off and partially sold."""
+    rows_data = []
+    for _, r in df.iterrows():
+        lots = build_closed_lots_table(trades, r['Type'], r['Stock'])
+        if lots.empty:
+            continue
+        cost, proceeds, pl = lots['Invested'].sum(), lots['Proceeds'].sum(), lots['Realized P/L'].sum()
+        rows_data.append({
+            'Stock': r['Stock'],
+            'Status': 'Squared off' if r['Units'] == 0 else 'Partial',
+            'Units_Left': int(r['Units']), 'Qty_Sold': lots['Qty'].sum(),
+            'Cost': cost, 'Proceeds': proceeds, 'PL': pl,
+            'Ret': (pl / cost) if cost else float('nan'),
+            'Last_Sale': lots['Sell Date'].max(),
+        })
+    st.markdown(f"#### {title} ({len(rows_data)})")
+    if not rows_data:
+        st.caption("No sales booked yet.")
+        return
+    rows_data.sort(key=lambda d: d['Last_Sale'], reverse=True)
+    rows = []
+    for i, d in enumerate(rows_data, start=1):
+        c = pl_color(d['PL'])
+        rows.append([
+            (i, None), (d['Stock'], None), (d['Status'], None), (f"{d['Units_Left']:,}", None),
+            (f"{d['Qty_Sold']:,.0f}", None), (money(d['Cost']), None), (money(d['Proceeds']), None),
+            (money(d['PL']), c), ("-" if pd.isna(d['Ret']) else f"{d['Ret']:.1%}", c),
+            (fmt_date(d['Last_Sale']), None),
+        ])
+    t_cost = sum(d['Cost'] for d in rows_data)
+    t_proc = sum(d['Proceeds'] for d in rows_data)
+    t_pl = sum(d['PL'] for d in rows_data)
+    rows.append([("", None), ("Total", None), ("", None), ("", None),
+                 (f"{sum(d['Qty_Sold'] for d in rows_data):,.0f}", None),
+                 (money(t_cost), None), (money(t_proc), None), (money(t_pl), pl_color(t_pl)),
+                 (f"{t_pl / t_cost:.1%}" if t_cost else "-", pl_color(t_pl)), ("", None)])
+    render_compact_table(
+        ['#', 'Stock', 'Status', 'Units_Left', 'Qty_Sold', 'Cost_of_Sold', 'Sale_Proceeds',
+         'Realized_PL', 'Return_%', 'Last_Sale'],
+        rows, left_cols=(1, 2), total_last=True, font_px=13
     )
 
 if page == "Dashboard Overview":
@@ -572,11 +619,13 @@ if page == "Dashboard Overview":
         st.info("No trades yet. Add one from the 'Add Trade' page.")
     else:
         open_df = portfolio_df[portfolio_df['Units'] > 0]
-        closed_df = portfolio_df[portfolio_df['Units'] == 0]
-        render_overview_open("🎯 Core Holdings", open_df[open_df['Type'] == 'CORE'])
-        render_overview_open("🚀 Satellite Holdings", open_df[open_df['Type'] == 'SATELLITE'])
-        render_overview_closed("✅ Core — Squared Off", closed_df[closed_df['Type'] == 'CORE'], processed_trades)
-        render_overview_closed("✅ Satellite — Squared Off", closed_df[closed_df['Type'] == 'SATELLITE'], processed_trades)
+        core_open = open_df[open_df['Type'] == 'CORE']
+        sat_open = open_df[open_df['Type'] == 'SATELLITE']
+        render_overview_open("🎯 Core Holdings", core_open)
+        render_overview_open("🚀 Satellite Holdings", sat_open)
+        render_day_change_summary(core_open, sat_open)
+        render_overview_booked("✅ Core P/L Booked", portfolio_df[portfolio_df['Type'] == 'CORE'], processed_trades)
+        render_overview_booked("✅ Satellite P/L Booked", portfolio_df[portfolio_df['Type'] == 'SATELLITE'], processed_trades)
 
 elif page == "Core Holdings":
     st.subheader("🎯 Core Holdings")
