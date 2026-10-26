@@ -185,6 +185,27 @@ def save_data(tb_df, co_df, sl_df=None):
             (sl_df if sl_df is not None else load_manual_sl()).to_excel(writer, sheet_name="Manual_SL", index=False)
     st.cache_data.clear()
 
+def rekey_manual_sl(old, new):
+    """A buy trade was edited: carry its manual stop-loss to the new (type, stock, date, price) key.
+    old/new = (type, stock, 'YYYY-MM-DD', price)."""
+    if old == new:
+        return
+    if DATABASE_URL:
+        db_init()
+        with db_connect() as conn, conn.cursor() as cur:
+            cur.execute("""UPDATE manual_sl SET type=%s, stock=%s, buy_date=%s, buy_price=%s, updated_at=now()
+                           WHERE type=%s AND stock=%s AND buy_date=%s AND buy_price=%s""", (*new, *old))
+        load_manual_sl.clear()
+        return
+    cur_sl = load_manual_sl()
+    if cur_sl.empty:
+        return
+    hit = cur_sl.apply(lambda x: (x['TYPE'], x['Stock'], str(x['Buy_Date'])[:10], round(float(x['Buy_Price']), 2)) == old, axis=1)
+    if hit.any():
+        cur_sl = cur_sl.copy()
+        cur_sl.loc[hit, ['TYPE', 'Stock', 'Buy_Date', 'Buy_Price']] = [new[0], new[1], new[2], new[3]]
+        save_data(trades_df, overrides_df, cur_sl)
+
 trades_df, overrides_df = load_data()
 manual_sl_df = load_manual_sl()
 
@@ -1172,6 +1193,7 @@ elif page == "Trade Book":
         st.info("No trades recorded yet. Add one from the 'Add Trade' page.")
     else:
         tb_view = trades_df.copy()
+        tb_view['_id'] = tb_view.index
         tb_view['Date of Trxn'] = pd.to_datetime(tb_view['Date of Trxn'])
         tb_view['Amount'] = tb_view['Price'].astype(float) * tb_view['Unit'].astype(float)
         tb_view['Action'] = tb_view['Unit'].apply(lambda u: 'BUY' if float(u) > 0 else 'SELL')
@@ -1207,15 +1229,113 @@ elif page == "Trade Book":
 
         tb_view = tb_view.sort_values('Date of Trxn', ascending=False).reset_index(drop=True)
         tb_view.index = tb_view.index + 1
-        tb_view = tb_view[['TYPE', 'Stock', 'Date of Trxn', 'Action', 'Price', 'Unit', 'Amount']]
+        tb_view = tb_view[['TYPE', 'Stock', 'Date of Trxn', 'Action', 'Price', 'Unit', 'Amount', '_id']]
 
-        st.dataframe(
-            tb_view.style.format({
-                'Date of Trxn': lambda d: d.strftime('%d-%b-%Y'),
-                'Price': '₹{:,.2f}', 'Unit': '{:,.0f}', 'Amount': '₹{:,.2f}'
-            }),
-            use_container_width=True
-        )
+        # ---- per-trade list with ✏️ edit / 🗑️ delete icons ----
+        st.markdown(
+            "<style>.st-key-tb_rows div[data-testid='stHorizontalBlock']{flex-wrap:nowrap!important;gap:.25rem!important;align-items:center}"
+            ".st-key-tb_rows div[data-testid='stColumn']{min-width:0!important}"
+            ".st-key-tb_rows button{padding:0 .35rem!important;min-height:2rem!important}"
+            ".st-key-tb_rows div[data-testid='stHorizontalBlock']{border-bottom:1px solid #E0E0E0;padding:2px 0}</style>",
+            unsafe_allow_html=True)
+
+        if st.session_state.get("tb_msg"):
+            st.success(st.session_state.pop("tb_msg"))
+
+        edit_id = st.session_state.get("tb_edit")
+        del_id = st.session_state.get("tb_del")
+        if edit_id is not None and edit_id not in trades_df.index:
+            edit_id = st.session_state["tb_edit"] = None
+        if del_id is not None and del_id not in trades_df.index:
+            del_id = st.session_state["tb_del"] = None
+
+        if edit_id is not None:
+            r = trades_df.loc[edit_id]
+            try:
+                r_date = pd.to_datetime(r['Date of Trxn']).date()
+            except Exception:
+                r_date = datetime.now().date()
+            with st.form(f"tb_edit_form_{edit_id}"):
+                st.markdown(f"**✏️ Edit trade — {esc(str(r['Stock']))}**")
+                e1, e2 = st.columns(2)
+                e_type = e1.selectbox("Type", ["CORE", "SATELLITE"], index=0 if str(r['TYPE']).upper() == "CORE" else 1)
+                e_stock = e2.text_input("Stock Symbol", value=str(r['Stock']))
+                e_date = e1.date_input("Transaction Date", r_date)
+                e_price = e2.number_input("Price per Unit (₹)", min_value=0.01, step=0.01, value=float(r['Price']))
+                e_units = e1.number_input("Units (+ Buy, − Sell)", step=1, value=int(float(r['Unit'])))
+                b1, b2 = st.columns(2)
+                do_save = b1.form_submit_button("💾 Save changes", type="primary")
+                do_cancel = b2.form_submit_button("Cancel")
+            if do_cancel:
+                st.session_state["tb_edit"] = None
+                st.rerun()
+            if do_save:
+                e_stock = e_stock.upper().strip()
+                if not e_stock or e_units == 0:
+                    st.warning("Stock symbol is required and Units cannot be 0.")
+                else:
+                    old_key = (str(r['TYPE']).upper(), str(r['Stock']).strip(), pd.to_datetime(r['Date of Trxn']).strftime('%Y-%m-%d'), round(float(r['Price']), 2))
+                    new_key = (e_type, e_stock, e_date.strftime('%Y-%m-%d'), round(float(e_price), 2))
+                    upd = trades_df.copy()
+                    upd.loc[edit_id, ['TYPE', 'Stock', 'Date of Trxn', 'Price', 'Unit', 'Amount']] = \
+                        [e_type, e_stock, e_date.strftime('%Y-%m-%d'), e_price, e_units, e_price * e_units]
+                    save_data(upd, overrides_df)
+                    if float(r['Unit']) > 0 and int(e_units) > 0:
+                        try:
+                            rekey_manual_sl(old_key, new_key)
+                        except Exception as exc:
+                            st.session_state["tb_msg"] = f"Trade updated, but its stop-loss could not be moved: {exc}"
+                    st.session_state["tb_edit"] = None
+                    st.session_state.setdefault("tb_msg", f"Updated trade for {e_stock}.")
+                    st.rerun()
+
+        if del_id is not None:
+            r = trades_df.loc[del_id]
+            st.warning(
+                f"Delete this trade? **{esc(str(r['Stock']))}** · {pd.to_datetime(r['Date of Trxn']).strftime('%d-%b-%Y')} · "
+                f"{'BUY' if float(r['Unit']) > 0 else 'SELL'} {abs(float(r['Unit'])):,.0f} @ ₹{float(r['Price']):,.2f}. "
+                f"This changes your holdings and P/L.")
+            d1, d2 = st.columns(2)
+            if d1.button("🗑️ Yes, delete", type="primary", key="tb_del_yes"):
+                upd = trades_df.drop(index=del_id).reset_index(drop=True)
+                save_data(upd, overrides_df)
+                st.session_state["tb_del"] = None
+                st.session_state["tb_msg"] = f"Deleted trade for {str(r['Stock'])}."
+                st.rerun()
+            if d2.button("Cancel", key="tb_del_no"):
+                st.session_state["tb_del"] = None
+                st.rerun()
+
+        PAGE_SIZE = 25
+        n_rows = len(tb_view)
+        n_pages = max(1, -(-n_rows // PAGE_SIZE))
+        tb_page = 1
+        if n_pages > 1:
+            tb_page = st.selectbox("Page", list(range(1, n_pages + 1)), key="tb_page",
+                                   format_func=lambda i: f"Page {i} of {n_pages}  (rows {(i-1)*PAGE_SIZE+1}–{min(i*PAGE_SIZE, n_rows)})")
+        page_rows = tb_view.iloc[(tb_page - 1) * PAGE_SIZE: tb_page * PAGE_SIZE]
+
+        with st.container(key="tb_rows"):
+            for serial, row in page_rows.iterrows():
+                oid = row['_id']
+                buy = row['Action'] == 'BUY'
+                col_a = "#2E7D32" if buy else "#C62828"
+                c_txt, c_ed, c_del = st.columns([10, 1, 1])
+                c_txt.markdown(
+                    f"<div style='line-height:1.25'><b>{serial}. {esc(str(row['Stock']))}</b> "
+                    f"<span style='font-size:11px;background:#EEE;border-radius:3px;padding:0 4px'>{esc(str(row['TYPE']))}</span> "
+                    f"<span style='color:{col_a};font-weight:700'>{row['Action']} {abs(float(row['Unit'])):,.0f}</span><br>"
+                    f"<span style='font-size:12px;color:#555'>{row['Date of Trxn'].strftime('%d-%b-%Y')} · "
+                    f"@ ₹{float(row['Price']):,.2f} · ₹{abs(float(row['Amount'])):,.2f}</span></div>",
+                    unsafe_allow_html=True)
+                if c_ed.button("✏️", key=f"tb_e_{oid}", help="Edit this trade", type="tertiary"):
+                    st.session_state["tb_edit"] = oid
+                    st.session_state["tb_del"] = None
+                    st.rerun()
+                if c_del.button("🗑️", key=f"tb_d_{oid}", help="Delete this trade", type="tertiary"):
+                    st.session_state["tb_del"] = oid
+                    st.session_state["tb_edit"] = None
+                    st.rerun()
 
         buys = tb_view[tb_view['Action'] == 'BUY']['Amount'].sum()
         sells = -tb_view[tb_view['Action'] == 'SELL']['Amount'].sum()
@@ -1234,7 +1354,7 @@ elif page == "Trade Book":
 
         st.download_button(
             "⬇️ Download as CSV",
-            tb_view.to_csv(index=False).encode('utf-8'),
+            tb_view.drop(columns=['_id']).to_csv(index=False).encode('utf-8'),
             file_name="trade_book.csv",
             mime="text/csv"
         )
