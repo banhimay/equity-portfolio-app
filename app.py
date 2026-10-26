@@ -788,6 +788,24 @@ def go_to_stock(label):
     st.session_state["_last_page"] = "Individual Stock"
     st.session_state["ind_stock_choice"] = label
 
+def stock_label(ptype, stock, is_open=True):
+    """Label used by the Individual Stock selector."""
+    return f"{ptype} — {stock}" + ("" if is_open else "  (closed)")
+
+def stock_link_pills(ptype, stocks, key, closed=()):
+    """Desktop: a row of clickable stock chips; picking one opens its Individual Stock page."""
+    if not stocks:
+        return
+    closed = set(closed)
+
+    def _open():
+        picked = st.session_state.get(key)
+        st.session_state[key] = None          # reset so the same chip can be used again later
+        if picked:
+            go_to_stock(stock_label(ptype, picked, picked not in closed))
+
+    st.pills("🔍 Open a stock's analysis", list(stocks), selection_mode="single", key=key, on_change=_open)
+
 def render_holdings_grid(df, ptype):
     """Core / Satellite holdings. Phone: a tappable stock link + small card per holding.
     Computer: the same compact bordered table as the Dashboard Overview, with a row of
@@ -808,23 +826,14 @@ def render_holdings_grid(df, ptype):
                                        ("Allocation", f"{df['Allocation_%'].sum():.1%}", None)])])
         return
 
-    if not df.empty:
-        chips_key = f"open_stock_{ptype}"
-
-        def _open_from_chips():
-            picked = st.session_state.get(chips_key)
-            if picked:
-                go_to_stock(f"{ptype} — {picked}")
-
-        st.pills("🔍 Open a stock's analysis", df['Stock'].tolist(), selection_mode="single",
-                 key=chips_key, on_change=_open_from_chips)
+    stock_link_pills(ptype, df['Stock'].tolist(), f"open_stock_{ptype}")
     render_overview_open("", df, heading=False, sum_value_alloc=True)
 
 def day_change_total(df):
     s = df['Day_Change']
     return s.sum() if s.notna().any() else float('nan')
 
-def render_overview_open(title, df, heading=True, sum_value_alloc=False):
+def render_overview_open(title, df, heading=True, sum_value_alloc=False, link_type=None):
     if heading:
         st.markdown(f"#### {title} ({len(df)})")
     if df.empty:
@@ -832,6 +841,8 @@ def render_overview_open(title, df, heading=True, sum_value_alloc=False):
         return
     rows = []
     cards = []
+    if link_type and not IS_MOBILE:
+        stock_link_pills(link_type, df['Stock'].tolist(), f"ov_open_{link_type}")
     for i, (_, r) in enumerate(df.iterrows(), start=1):
         # CMP is coloured by today's move: above yesterday's close = green, below = red
         cmp_color = None
@@ -854,16 +865,26 @@ def render_overview_open(title, df, heading=True, sum_value_alloc=False):
             (f"{r['Allocation_%']:.1%}", None),
         ])
     tot = day_change_total(df)
-    val_sum, alloc_sum = df['Total_Value'].sum(), df['Allocation_%'].sum()
+    val_sum, alloc_sum, cost_sum = df['Total_Value'].sum(), df['Allocation_%'].sum(), df['Total_Cost'].sum()
     if IS_MOBILE:
-        extra = [("Total value", money(val_sum), None), ("Allocation", f"{alloc_sum:.1%}", None)] if sum_value_alloc else []
-        cards.append(card_html(title="Total 1_Day_Change", right=money(tot), right_color=pl_color(tot),
-                               items=extra, total=True))
-        render_cards(cards)
+        extra = [("Total invested", money(cost_sum), None), ("Total value", money(val_sum), None)]
+        if sum_value_alloc:
+            extra.append(("Allocation", f"{alloc_sum:.1%}", None))
+        total_card = card_html(title="Total 1_Day_Change", right=money(tot), right_color=pl_color(tot),
+                               items=extra, total=True)
+        if link_type:
+            for i, ((_, r), card) in enumerate(zip(df.iterrows(), cards), start=1):
+                st.button(f"{i}.  {r['Stock']}", key=f"ovb_{link_type}_{i}_{r['Stock']}", type="tertiary",
+                          on_click=go_to_stock, args=(stock_label(link_type, r['Stock']),))
+                render_cards([card])
+            render_cards([total_card])
+        else:
+            render_cards(cards + [total_card])
         return
-    tail = ([(money(val_sum), None)] + [("", None)] * 3 + [(f"{alloc_sum:.1%}", None)]) if sum_value_alloc \
-        else [("", None)] * 5
-    rows.append([("", None), ("Total", None)] + [("", None)] * 5 + [(money(tot), pl_color(tot))] + tail)
+    tail = [(money(val_sum), None), ("", None), ("", None), ("", None),
+            (f"{alloc_sum:.1%}" if sum_value_alloc else "", None)]
+    rows.append([("", None), ("Total", None), ("", None), ("", None), (money(cost_sum), None), ("", None), ("", None),
+                 (money(tot), pl_color(tot))] + tail)
     render_compact_table(
         ['#', 'Stock', 'Units', 'Avg_Cost', 'Total_Cost', 'CMP', 'Yest_Close', '1_Day_Change',
          'Total_Value', 'Unrealized_PL', 'Realized_PL', 'Total_Net_Gain', 'Allocation_%'],
@@ -882,6 +903,7 @@ def render_day_change_summary(core_df, sat_df):
 
 def render_overview_booked(title, df, trades):
     """P/L booked = every stock with at least one sale: fully squared off and partially sold."""
+    ptype_b = str(df['Type'].iloc[0]) if len(df) else ""
     rows_data = []
     for _, r in df.iterrows():
         lots = build_closed_lots_table(trades, r['Type'], r['Stock'])
@@ -919,9 +941,15 @@ def render_overview_booked(title, df, trades):
             items=[("Cost", money(t_cost), None), ("Proceeds", money(t_proc), None),
                    ("Return", f"{t_pl / t_cost:.1%}" if t_cost else "-", pl_color(t_pl))]))
         with st.expander(f"{title} ({len(rows_data)})  ·  {money(t_pl)}", expanded=False):
-            render_cards(cards)
+            for i, d in enumerate(rows_data, start=1):
+                st.button(f"{i}.  {d['Stock']}", key=f"bkb_{ptype_b}_{i}_{d['Stock']}", type="tertiary",
+                          on_click=go_to_stock, args=(stock_label(ptype_b, d['Stock'], d['Units_Left'] > 0),))
+                render_cards([cards[i - 1]])
+            render_cards([cards[-1]])
         return
     st.markdown(f"#### {title} ({len(rows_data)})")
+    stock_link_pills(ptype_b, [d['Stock'] for d in rows_data], f"bk_open_{ptype_b}",
+                     closed=[d['Stock'] for d in rows_data if d['Units_Left'] == 0])
     rows = []
     for i, d in enumerate(rows_data, start=1):
         c = pl_color(d['PL'])
@@ -988,8 +1016,8 @@ if page == "Dashboard Overview":
         open_df = portfolio_df[portfolio_df['Units'] > 0]
         core_open = open_df[open_df['Type'] == 'CORE']
         sat_open = open_df[open_df['Type'] == 'SATELLITE']
-        render_overview_open("🎯 Core Holdings", core_open)
-        render_overview_open("🚀 Satellite Holdings", sat_open)
+        render_overview_open("🎯 Core Holdings", core_open, link_type="CORE")
+        render_overview_open("🚀 Satellite Holdings", sat_open, link_type="SATELLITE")
         render_day_change_summary(core_open, sat_open)
         render_overview_booked("✅ Core P/L Booked", portfolio_df[portfolio_df['Type'] == 'CORE'], processed_trades)
         render_overview_booked("✅ Satellite P/L Booked", portfolio_df[portfolio_df['Type'] == 'SATELLITE'], processed_trades)
