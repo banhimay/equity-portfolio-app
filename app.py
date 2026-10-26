@@ -687,7 +687,7 @@ def render_cards(cards):
 
 # --- NAVIGATION ---
 PAGES = ["Dashboard Overview", "Core Holdings", "Satellite Holdings",
-         "Profit/Loss", "Individual Stock", "Trade Book", "Add Trade", "CMP Overrides"]
+         "Profit/Loss", "Individual Stock", "Trailing Stop Loss", "Trade Book", "Add Trade", "CMP Overrides"]
 
 def do_logout():
     st.session_state["authenticated"] = False
@@ -697,7 +697,7 @@ def do_refresh():
 
 NAV_LABELS = {
     "Dashboard Overview": "🏠 Overview", "Core Holdings": "🎯 Core", "Satellite Holdings": "🚀 Satellite",
-    "Profit/Loss": "📉 Profit/Loss", "Individual Stock": "🔍 Stock", "Trade Book": "📒 Trade Book",
+    "Profit/Loss": "📉 Profit/Loss", "Individual Stock": "🔍 Stock", "Trailing Stop Loss": "🛡️ Trailing SL", "Trade Book": "📒 Trade Book",
     "Add Trade": "➕ Add Trade", "CMP Overrides": "⚙️ CMP",
 }
 
@@ -1008,6 +1008,57 @@ def render_pl_booked(title, df, is_loss):
         rows, left_cols=(1, 2), total_last=True, font_px=13
     )
 
+def trailing_sl_table(ptype):
+    """One row per open position of this type: last entered ('trailing') stop-loss vs CMP."""
+    out = []
+    sub = portfolio_df[(portfolio_df['Type'] == ptype) & (portfolio_df['Units'] > 0)].sort_values('Stock')
+    for _, r in sub.iterrows():
+        lots = get_remaining_lots(processed_trades, ptype, r['Stock'])
+        if not lots:
+            continue
+        manual = {}
+        if not manual_sl_df.empty:
+            ms = manual_sl_df[(manual_sl_df['TYPE'] == ptype) & (manual_sl_df['Stock'] == r['Stock'])]
+            for _, mr in ms.iterrows():
+                manual[(str(mr['Buy_Date'])[:10], round(float(mr['Buy_Price']), 2))] = float(mr['SL_Price'])
+        tdf = build_tranche_table(lots, float(r['CMP']), manual_sl=manual)
+        entered = tdf['Stop-Loss Price'].dropna()
+        tsl = float(entered.iloc[-1]) if len(entered) else float('nan')
+        cmp_ = float(r['CMP'])
+        out.append({'Stock': r['Stock'], 'Tranche': int(len(tdf)), 'Trailing_SL': tsl, 'CMP': cmp_,
+                    'Diff': (cmp_ - tsl) if pd.notna(tsl) else float('nan'),
+                    'Diff_pct': ((cmp_ - tsl) / tsl) if pd.notna(tsl) and tsl else float('nan')})
+    return out
+
+def render_trailing_sl(title, ptype):
+    data = trailing_sl_table(ptype)
+    st.markdown(f"#### {title} ({len(data)})")
+    if not data:
+        st.caption("No open positions.")
+        return
+    if IS_MOBILE:
+        for i, d in enumerate(data, start=1):
+            c = None if pd.isna(d['Diff']) else (UP if d['Diff'] >= 0 else DOWN)
+            st.button(f"{i}.  {d['Stock']}", key=f"tslb_{ptype}_{i}_{d['Stock']}", type="tertiary",
+                      on_click=go_to_stock, args=(stock_label(ptype, d['Stock']),))
+            render_cards([card_html(items=[
+                ("Tranche", str(d['Tranche']), None), ("CMP", money(d['CMP']), None),
+                ("Trailing SL", "—" if pd.isna(d['Trailing_SL']) else money(d['Trailing_SL']), None),
+                ("Difference", "—" if pd.isna(d['Diff']) else f"{money(d['Diff'])} ({d['Diff_pct']:+.1%})", c)])])
+        return
+    stock_link_pills(ptype, [d['Stock'] for d in data], f"tsl_open_{ptype}")
+    rows = []
+    for i, d in enumerate(data, start=1):
+        c = None if pd.isna(d['Diff']) else (UP if d['Diff'] >= 0 else DOWN)
+        rows.append([
+            (i, None), (d['Stock'], None), (d['Tranche'], None),
+            ("—" if pd.isna(d['Trailing_SL']) else money(d['Trailing_SL']), None),
+            (money(d['CMP']), None),
+            ("—" if pd.isna(d['Diff']) else f"{money(d['Diff'])} ({d['Diff_pct']:+.1%})", c),
+        ])
+    render_compact_table(['SL', 'STOCK', 'Tranche', 'Trailing SL', 'CMP', 'Difference'], rows,
+                         left_cols=(1,), font_px=13)
+
 if page == "Dashboard Overview":
     st.subheader("📊 Dashboard Overview")
     if portfolio_df.empty:
@@ -1129,13 +1180,18 @@ elif page == "Individual Stock":
                 ("CMP", money(cmp_price), None, None),
                 ("Weighted Avg Cost", money(weighted_avg), None, None),
                 ("Unrealized P&L", money(current_pl), f"{current_pl_pct*100:+.2f}%", pl_color(current_pl)),
-                ("Current Stop-Loss", sl_value, sl_sub, sl_sub_color),
             ])
+            if not sl_pending and current_sl_price > 0:
+                sl_gap_pct = (cmp_price - current_sl_price) / current_sl_price * 100
+                sl_pct_txt = f"CMP {abs(sl_gap_pct):.1f}% {'above' if sl_gap_pct >= 0 else 'below'} SL"
+                sl_pct_col = UP if sl_gap_pct >= 0 else DOWN
+                sl_tile = ("Current Stop-Loss", sl_value, sl_pct_txt, sl_pct_col, sl_pct_col)
+            else:
+                sl_tile = ("Current Stop-Loss", sl_value, sl_sub, sl_sub_color, sl_sub_color)
             kpi_grid([
                 ("Total Invested Amount", money(total_investment), None, None),
                 ("Current Value", money(current_val), None, None),
-                ("Appreciation", f"{current_pl_pct*100:+.2f}%", money(current_pl), pl_color(current_pl),
-                 pl_color(current_pl)),
+                sl_tile,
             ], small=True)
 
             st.markdown("#### Tranche Breakdown & Stop-Loss (open position)")
@@ -1281,6 +1337,17 @@ elif page == "Individual Stock":
                 f"</span></p>",
                 unsafe_allow_html=True
             )
+
+elif page == "Trailing Stop Loss":
+    st.subheader("🛡️ Trailing Stop Loss")
+    if portfolio_df.empty:
+        st.info("No positions yet.")
+    else:
+        render_trailing_sl("🚀 Satellite Holdings", "SATELLITE")
+        render_trailing_sl("🎯 Core Holdings", "CORE")
+        st.caption("Trailing SL = the last stop-loss entered for the stock: your latest Shaktiman value "
+                   "(tranche 4+), otherwise the rule-based SL of its last tranche. Tranche = number of open "
+                   "tranches. Difference = CMP − Trailing SL (green = CMP above the stop, red = below).")
 
 elif page == "Trade Book":
     st.subheader("📒 Trade Book")
