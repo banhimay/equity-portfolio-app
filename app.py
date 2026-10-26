@@ -550,7 +550,7 @@ def fmt_num(v, decimals=2):
     s = f"{v:,.{decimals}f}"
     return s.rstrip('0').rstrip('.') if decimals > 0 and '.' in s else s
 
-def render_compact_table(headers, rows, left_cols=(), auto_width=False, total_last=False, font_px=12):
+def render_compact_table(headers, rows, left_cols=(), auto_width=False, total_last=False, font_px=12, fit=False):
     """Small-font HTML table that fits in one view. rows = list of lists of
     (text, css_color_or_None). total_last=True styles the last row as a total row.
     Works in light and dark themes."""
@@ -565,7 +565,12 @@ def render_compact_table(headers, rows, left_cols=(), auto_width=False, total_la
            "background:rgba(128,128,128,0.10);}"
            "</style>")
     width = "width:auto;" if auto_width else "width:100%;"
-    head = "".join(f"<th>{html_lib.escape(h)}</th>" for h in headers)
+    if fit:   # squeeze into the page width: tighter cells, headers may wrap (breaking after "_")
+        css = css.replace("</style>",
+            "table.cmp.fit th,table.cmp.fit td{padding:3px 4px;}"
+            "table.cmp.fit th{white-space:normal;line-height:1.15;}"
+            "</style>")
+    head = "".join(f"<th>{html_lib.escape(h).replace('_', '_<wbr>') if fit else html_lib.escape(h)}</th>" for h in headers)
     body = ""
     for ri, r in enumerate(rows):
         tds = ""
@@ -581,7 +586,7 @@ def render_compact_table(headers, rows, left_cols=(), auto_width=False, total_la
         tr_cls = " class='tot'" if (total_last and ri == len(rows) - 1) else ""
         body += f"<tr{tr_cls}>{tds}</tr>"
     st.markdown(
-        f"{css}<div class='cmp-wrap'><table class='cmp' style='{width}font-size:{font_px}px;'>"
+        f"{css}<div class='cmp-wrap'><table class='cmp{" fit" if fit else ""}' style='{width}font-size:{font_px}px;'>"
         f"<thead><tr>{head}</tr></thead><tbody>{body}</tbody></table></div>",
         unsafe_allow_html=True
     )
@@ -888,7 +893,7 @@ def render_overview_open(title, df, heading=True, sum_value_alloc=False, link_ty
     render_compact_table(
         ['#', 'Stock', 'Units', 'Avg_Cost', 'Total_Cost', 'CMP', 'Yest_Close', '1_Day_Change',
          'Total_Value', 'Unrealized_PL', 'Realized_PL', 'Total_Net_Gain', 'Allocation_%'],
-        rows, left_cols=(1,), total_last=True, font_px=13
+        rows, left_cols=(1,), total_last=True, font_px=12 if link_type else 13, fit=bool(link_type)
     )
 
 def render_day_change_summary(core_df, sat_df):
