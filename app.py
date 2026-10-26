@@ -1231,16 +1231,35 @@ elif page == "Trade Book":
         tb_view.index = tb_view.index + 1
         tb_view = tb_view[['TYPE', 'Stock', 'Date of Trxn', 'Action', 'Price', 'Unit', 'Amount', '_id']]
 
-        # ---- per-trade list with ✏️ edit / 🗑️ delete icons ----
-        st.markdown(
-            "<style>.st-key-tb_rows div[data-testid='stHorizontalBlock']{flex-wrap:nowrap!important;gap:.25rem!important;align-items:center}"
-            ".st-key-tb_rows div[data-testid='stColumn']{min-width:0!important}"
-            ".st-key-tb_rows button{padding:0 .35rem!important;min-height:2rem!important}"
-            ".st-key-tb_rows div[data-testid='stHorizontalBlock']{border-bottom:1px solid #E0E0E0;padding:2px 0}</style>",
-            unsafe_allow_html=True)
-
+        # ---- table: tick a row's checkbox, then use ✏️ Edit / 🗑️ Delete just below ----
         if st.session_state.get("tb_msg"):
             st.success(st.session_state.pop("tb_msg"))
+
+        disp = tb_view.drop(columns=['_id'])
+        ev = st.dataframe(
+            disp.style.format({
+                'Date of Trxn': lambda d: d.strftime('%d-%b-%Y'),
+                'Price': '₹{:,.2f}', 'Unit': '{:,.0f}', 'Amount': '₹{:,.2f}'
+            }),
+            use_container_width=True, on_select="rerun", selection_mode="single-row", key=f"tb_table_{st.session_state.get('tb_ver', 0)}"
+        )
+        sel_rows = ev.selection.rows if ev and ev.selection else []
+        sel_id = int(tb_view['_id'].iloc[sel_rows[0]]) if sel_rows and sel_rows[0] < len(tb_view) else None
+        if sel_id is None:
+            st.caption("👆 Tick the box at the left of a row to edit or delete that trade.")
+        else:
+            sr = tb_view.iloc[sel_rows[0]]
+            st.markdown(f"Selected: **{esc(str(sr['Stock']))}** · {sr['Date of Trxn'].strftime('%d-%b-%Y')} · "
+                        f"{sr['Action']} {abs(float(sr['Unit'])):,.0f} @ ₹{float(sr['Price']):,.2f}")
+            bb1, bb2, _sp = st.columns([1, 1, 3])
+            if bb1.button("✏️ Edit", key="tb_btn_edit", use_container_width=True):
+                st.session_state["tb_edit"] = sel_id
+                st.session_state["tb_del"] = None
+                st.rerun()
+            if bb2.button("🗑️ Delete", key="tb_btn_del", use_container_width=True):
+                st.session_state["tb_del"] = sel_id
+                st.session_state["tb_edit"] = None
+                st.rerun()
 
         edit_id = st.session_state.get("tb_edit")
         del_id = st.session_state.get("tb_del")
@@ -1286,6 +1305,7 @@ elif page == "Trade Book":
                         except Exception as exc:
                             st.session_state["tb_msg"] = f"Trade updated, but its stop-loss could not be moved: {exc}"
                     st.session_state["tb_edit"] = None
+                    st.session_state["tb_ver"] = st.session_state.get("tb_ver", 0) + 1
                     st.session_state.setdefault("tb_msg", f"Updated trade for {e_stock}.")
                     st.rerun()
 
@@ -1300,42 +1320,12 @@ elif page == "Trade Book":
                 upd = trades_df.drop(index=del_id).reset_index(drop=True)
                 save_data(upd, overrides_df)
                 st.session_state["tb_del"] = None
+                st.session_state["tb_ver"] = st.session_state.get("tb_ver", 0) + 1
                 st.session_state["tb_msg"] = f"Deleted trade for {str(r['Stock'])}."
                 st.rerun()
             if d2.button("Cancel", key="tb_del_no"):
                 st.session_state["tb_del"] = None
                 st.rerun()
-
-        PAGE_SIZE = 25
-        n_rows = len(tb_view)
-        n_pages = max(1, -(-n_rows // PAGE_SIZE))
-        tb_page = 1
-        if n_pages > 1:
-            tb_page = st.selectbox("Page", list(range(1, n_pages + 1)), key="tb_page",
-                                   format_func=lambda i: f"Page {i} of {n_pages}  (rows {(i-1)*PAGE_SIZE+1}–{min(i*PAGE_SIZE, n_rows)})")
-        page_rows = tb_view.iloc[(tb_page - 1) * PAGE_SIZE: tb_page * PAGE_SIZE]
-
-        with st.container(key="tb_rows"):
-            for serial, row in page_rows.iterrows():
-                oid = row['_id']
-                buy = row['Action'] == 'BUY'
-                col_a = "#2E7D32" if buy else "#C62828"
-                c_txt, c_ed, c_del = st.columns([10, 1, 1])
-                c_txt.markdown(
-                    f"<div style='line-height:1.25'><b>{serial}. {esc(str(row['Stock']))}</b> "
-                    f"<span style='font-size:11px;background:#EEE;border-radius:3px;padding:0 4px'>{esc(str(row['TYPE']))}</span> "
-                    f"<span style='color:{col_a};font-weight:700'>{row['Action']} {abs(float(row['Unit'])):,.0f}</span><br>"
-                    f"<span style='font-size:12px;color:#555'>{row['Date of Trxn'].strftime('%d-%b-%Y')} · "
-                    f"@ ₹{float(row['Price']):,.2f} · ₹{abs(float(row['Amount'])):,.2f}</span></div>",
-                    unsafe_allow_html=True)
-                if c_ed.button("✏️", key=f"tb_e_{oid}", help="Edit this trade", type="tertiary"):
-                    st.session_state["tb_edit"] = oid
-                    st.session_state["tb_del"] = None
-                    st.rerun()
-                if c_del.button("🗑️", key=f"tb_d_{oid}", help="Delete this trade", type="tertiary"):
-                    st.session_state["tb_del"] = oid
-                    st.session_state["tb_edit"] = None
-                    st.rerun()
 
         buys = tb_view[tb_view['Action'] == 'BUY']['Amount'].sum()
         sells = -tb_view[tb_view['Action'] == 'SELL']['Amount'].sum()
