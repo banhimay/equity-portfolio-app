@@ -76,8 +76,7 @@ st.markdown(
 )
 
 # --- DATA LOADING AND SAVING ---
-@st.cache_data(ttl=600)
-def load_data():
+def _load_data_xlsx():
     if os.path.exists(EXCEL_FILE):
         tb = pd.read_excel(EXCEL_FILE, sheet_name="Trade_Book")
         tb = tb.loc[:, ~tb.columns.str.contains('^Unnamed')].dropna(subset=['Stock'])
@@ -91,6 +90,45 @@ def load_data():
         tb = pd.DataFrame(columns=['TYPE', 'Stock', 'Date of Trxn', 'Price', 'Unit', 'Amount'])
         co = pd.DataFrame(columns=['Stock', 'Manual CMP', 'Note'])
     return tb, co
+
+def _db_write_trades(cur, tb, co):
+    """Replace-all write of the Trade Book and CMP overrides (single user, inside one transaction)."""
+    cur.execute("DELETE FROM trades")
+    rows = []
+    for _, r in tb.iterrows():
+        d = pd.to_datetime(r['Date of Trxn']).strftime('%Y-%m-%d')
+        rows.append((str(r['TYPE']).strip().upper(), str(r['Stock']).strip(), d, float(r['Price']), float(r['Unit'])))
+    if rows:
+        cur.executemany("INSERT INTO trades (type, stock, trade_date, price, unit) VALUES (%s,%s,%s,%s,%s)", rows)
+    cur.execute("DELETE FROM cmp_override")
+    crow = []
+    for _, r in co.iterrows():
+        if pd.isna(r.get('Stock')) or pd.isna(r.get('Manual CMP')):
+            continue
+        note = r.get('Note')
+        crow.append((str(r['Stock']).strip(), float(r['Manual CMP']), None if pd.isna(note) else str(note)))
+    if crow:
+        cur.executemany("INSERT INTO cmp_override (stock, manual_cmp, note) VALUES (%s,%s,%s)", crow)
+
+@st.cache_data(ttl=600)
+def load_data():
+    if DATABASE_URL:
+        try:
+            db_init()
+            with db_connect() as conn, conn.cursor() as cur:
+                cur.execute("SELECT type, stock, trade_date, price::float, unit::float FROM trades ORDER BY id")
+                tb = pd.DataFrame(cur.fetchall(), columns=['TYPE', 'Stock', 'Date of Trxn', 'Price', 'Unit'])
+                cur.execute("SELECT stock, manual_cmp::float, note FROM cmp_override ORDER BY id")
+                co = pd.DataFrame(cur.fetchall(), columns=['Stock', 'Manual CMP', 'Note'])
+        except Exception as exc:
+            st.error(f"Could not read the trade database: {exc}")
+            st.stop()
+        tb['Date of Trxn'] = pd.to_datetime(tb['Date of Trxn'])
+        if len(tb) and (tb['Unit'] % 1 == 0).all():
+            tb['Unit'] = tb['Unit'].astype('int64')
+        tb['Amount'] = tb['Price'] * tb['Unit']
+        return tb, co
+    return _load_data_xlsx()
 
 # ---- trailing stop-loss ("Shaktiman", tranche 4+): Postgres when DATABASE_URL is set, else the xlsx ----
 def db_connect():
@@ -108,6 +146,17 @@ def db_init():
             id serial PRIMARY KEY, type text NOT NULL, stock text NOT NULL, buy_date text NOT NULL,
             buy_price numeric(14,2) NOT NULL, sl_price numeric(14,2) NOT NULL,
             changed_at timestamptz NOT NULL DEFAULT now())""")
+        cur.execute("""CREATE TABLE IF NOT EXISTS trades (
+            id serial PRIMARY KEY, type text NOT NULL, stock text NOT NULL, trade_date text NOT NULL,
+            price numeric(14,4) NOT NULL, unit numeric(14,4) NOT NULL)""")
+        cur.execute("""CREATE TABLE IF NOT EXISTS cmp_override (
+            id serial PRIMARY KEY, stock text NOT NULL, manual_cmp numeric(14,4) NOT NULL, note text)""")
+        cur.execute("CREATE TABLE IF NOT EXISTS app_meta (key text PRIMARY KEY, value text)")
+        cur.execute("SELECT 1 FROM app_meta WHERE key='trades_seeded'")
+        if cur.fetchone() is None:   # first run: copy the Trade Book from the repo's xlsx once
+            tb, co = _load_data_xlsx()
+            _db_write_trades(cur, tb, co)
+            cur.execute("INSERT INTO app_meta (key, value) VALUES ('trades_seeded', now()::text)")
     return True
 
 @st.cache_data(ttl=600)
@@ -178,11 +227,16 @@ def load_sl_history(sel_type, sel_stock):
         return pd.DataFrame()
 
 def save_data(tb_df, co_df, sl_df=None):
+    if DATABASE_URL:   # trades + CMP overrides live in Postgres (survive redeploys)
+        db_init()
+        with db_connect() as conn, conn.cursor() as cur:
+            _db_write_trades(cur, tb_df, co_df)
+        st.cache_data.clear()
+        return
     with pd.ExcelWriter(EXCEL_FILE, engine='openpyxl') as writer:
         tb_df.to_excel(writer, sheet_name="Trade_Book", index=False)
         co_df.to_excel(writer, sheet_name="CMP_Override", index=False)
-        if not DATABASE_URL:   # xlsx fallback keeps the manual stop-losses in its own sheet
-            (sl_df if sl_df is not None else load_manual_sl()).to_excel(writer, sheet_name="Manual_SL", index=False)
+        (sl_df if sl_df is not None else load_manual_sl()).to_excel(writer, sheet_name="Manual_SL", index=False)
     st.cache_data.clear()
 
 def rekey_manual_sl(old, new):
