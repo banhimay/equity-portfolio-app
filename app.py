@@ -1102,6 +1102,10 @@ elif page == "Individual Stock":
                 for _, mr in msub.iterrows():
                     stock_manual[(str(mr['Buy_Date'])[:10], round(float(mr['Buy_Price']), 2))] = float(mr['SL_Price'])
             tranche_df = build_tranche_table(lots, cmp_price, manual_sl=stock_manual)
+            # Trailing SL = the last stop-loss that was entered: the latest manual (Shaktiman) value if any,
+            # otherwise the formula SL of the last tranche among 1-3
+            _sl_entered = tranche_df['Stop-Loss Price'].dropna()
+            trailing_sl = float(_sl_entered.iloc[-1]) if len(_sl_entered) else float('nan')
 
             total_qty = tranche_df['Cum. Qty'].iloc[-1]
             total_investment = tranche_df['Investment'].sum()
@@ -1141,6 +1145,7 @@ elif page == "Individual Stock":
                 gp, gc = r['Growth % vs Prev Tranche'], r['Growth % vs CMP']
                 pl = r['Tranche P/L (₹)']
                 sl_p, risk = r['Stop-Loss Price'], r['Risk Amount (₹)']
+                trail_pl = r['Qty'] * (trailing_sl - r['Buy Price']) if pd.notna(trailing_sl) else float('nan')
                 if r['Manual SL']:
                     sl_cell = (("enter ↓" if pd.isna(sl_p) else fmt_num(sl_p)), None, MANUAL_BG)
                 else:
@@ -1156,12 +1161,20 @@ elif page == "Individual Stock":
                     sl_cell,
                     ("—" if pd.isna(risk) else fmt_num(risk, 0), None),
                     (fmt_num(pl, 0), GREEN if pl >= 0 else RED),
+                    ("—" if pd.isna(trailing_sl) else fmt_num(trailing_sl), None),
+                    ("—" if pd.isna(trailing_sl) else fmt_num(trail_pl, 0),
+                     None if pd.isna(trailing_sl) else (GREEN if trail_pl >= 0 else RED)),
                 ])
             render_compact_table(
-                ['#', 'Date', 'Buy ₹', 'Qty', 'Invested ₹', 'Cum Qty', 'Avg Cost ₹',
-                 'Δ vs Prev', 'Δ vs CMP', 'SL Rule', 'SL ₹', 'Risk ₹', 'P/L ₹'],
-                t_rows, left_cols=(1, 9)
+                ['#', 'Date', 'Buy ₹', 'Qty', 'Inv ₹', 'Cum Qty', 'Avg ₹',
+                 'Δ Prev', 'Δ CMP', 'SL Rule', 'SL ₹', 'Risk ₹', 'P/L ₹', 'Trailing SL ₹', 'P/L @ Trail SL ₹'],
+                t_rows, left_cols=(1, 9), font_px=11
             )
+            if not pd.isna(trailing_sl):
+                trail_total = float((tranche_df['Qty'] * (trailing_sl - tranche_df['Buy Price'])).sum())
+                st.caption(f"Trailing SL ₹{trailing_sl:,.2f} = the last stop-loss entered. P/L @ Trail SL = "
+                           f"Qty × (Trailing SL − Buy ₹): what each tranche makes or loses if the stop is hit. "
+                           f"Total if hit: {'-' if trail_total < 0 else ''}₹{abs(trail_total):,.0f}.")
             st.caption("SL rule: Tranche 1 = 10% below its buy price · Tranche 2 = same ₹ risk as "
                        "Tranche 1 · Tranche 3 = breakeven (avg cost of all tranches) · "
                        "Tranche 4+ = Shaktiman — stop-loss entered by hand (yellow cell).")
