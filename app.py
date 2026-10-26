@@ -1025,7 +1025,7 @@ def trailing_sl_table(ptype):
         entered = tdf['Stop-Loss Price'].dropna()
         tsl = float(entered.iloc[-1]) if len(entered) else float('nan')
         cmp_ = float(r['CMP'])
-        out.append({'Stock': r['Stock'], 'Tranche': int(len(tdf)), 'Trailing_SL': tsl, 'CMP': cmp_,
+        out.append({'Stock': r['Stock'], 'WAC': float(tdf['Weighted Avg Cost'].iloc[-1]), 'Tranche': int(len(tdf)), 'Trailing_SL': tsl, 'CMP': cmp_,
                     'Diff': (cmp_ - tsl) if pd.notna(tsl) else float('nan'),
                     'Diff_pct': ((cmp_ - tsl) / tsl) if pd.notna(tsl) and tsl else float('nan')})
     return out
@@ -1042,7 +1042,8 @@ def render_trailing_sl(title, ptype):
             st.button(f"{i}.  {d['Stock']}", key=f"tslb_{ptype}_{i}_{d['Stock']}", type="tertiary",
                       on_click=go_to_stock, args=(stock_label(ptype, d['Stock']),))
             render_cards([card_html(items=[
-                ("Tranche", str(d['Tranche']), None), ("CMP", money(d['CMP']), None),
+                ("Wtd Avg Cost", money(d['WAC']), None), ("Tranche", str(d['Tranche']), None),
+                ("CMP", money(d['CMP']), None),
                 ("Trailing SL", "—" if pd.isna(d['Trailing_SL']) else money(d['Trailing_SL']), None),
                 ("Difference", "—" if pd.isna(d['Diff']) else f"{money(d['Diff'])} ({d['Diff_pct']:+.1%})", c)])])
         return
@@ -1051,12 +1052,12 @@ def render_trailing_sl(title, ptype):
     for i, d in enumerate(data, start=1):
         c = None if pd.isna(d['Diff']) else (UP if d['Diff'] >= 0 else DOWN)
         rows.append([
-            (i, None), (d['Stock'], None), (d['Tranche'], None),
+            (i, None), (d['Stock'], None), (money(d['WAC']), None), (d['Tranche'], None),
             ("—" if pd.isna(d['Trailing_SL']) else money(d['Trailing_SL']), None),
             (money(d['CMP']), None),
             ("—" if pd.isna(d['Diff']) else f"{money(d['Diff'])} ({d['Diff_pct']:+.1%})", c),
         ])
-    render_compact_table(['SL', 'STOCK', 'Tranche', 'Trailing SL', 'CMP', 'Difference'], rows,
+    render_compact_table(['SL', 'STOCK', 'Weighted Avg Cost', 'Tranche', 'Trailing SL', 'CMP', 'Difference'], rows,
                          left_cols=(1,), font_px=13)
 
 if page == "Dashboard Overview":
