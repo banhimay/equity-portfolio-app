@@ -1241,17 +1241,27 @@ elif page == "Trade Book":
 
 elif page == "Add Trade":
     st.subheader("📝 Record New Trade")
+    if st.session_state.get("trade_saved_msg"):
+        st.success(st.session_state.pop("trade_saved_msg"))
+    known_symbols = sorted(trades_df['Stock'].astype(str).str.strip().str.upper().unique().tolist()) \
+        if not trades_df.empty else []
     with st.form("new_trade_form"):
         c1, c2 = st.columns(2)
         with c1:
             p_type = st.selectbox("Type", ["CORE", "SATELLITE"])
-            stock = st.text_input("Stock Symbol (e.g. BHEL, ACUTAAS)").upper().strip()
+            stock = st.selectbox(
+                "Stock Symbol — type 2–3 letters to search",
+                known_symbols, index=None, accept_new_options=True,
+                placeholder="e.g. type BHE → BHEL  (new stock? type its full symbol)")
+            stock = (stock or "").upper().strip()
             date = st.date_input("Transaction Date", datetime.now())
         with c2:
             price = st.number_input("Price per Unit (₹)", min_value=0.01, step=0.01)
             units = st.number_input("Units (+ for Buy, - for Sell)", step=1)
 
         submitted = st.form_submit_button("Save Transaction")
+        if submitted and not stock:
+            st.warning("Please pick or type a stock symbol first.")
         if submitted and stock:
             new_row = pd.DataFrame([{
                 'TYPE': p_type,
@@ -1263,7 +1273,10 @@ elif page == "Add Trade":
             }])
             updated_trades = pd.concat([trades_df, new_row], ignore_index=True)
             save_data(updated_trades, overrides_df)
-            st.success(f"Added trade for {stock} successfully!")
+            st.session_state["trade_saved_msg"] = (
+                f"Added trade for {stock} successfully!" if stock in known_symbols else
+                f"Added trade for {stock} — this is a NEW symbol (first trade for it). "
+                f"If that was a typo, tell me and I'll fix the Trade Book.")
             st.rerun()
 
 elif page == "CMP Overrides":
