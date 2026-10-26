@@ -26,6 +26,8 @@ st.set_page_config(page_title="Equity Portfolio Dashboard", layout="wide",
                    initial_sidebar_state="collapsed" if IS_MOBILE else "expanded")
 
 EXCEL_FILE = "Equity_Portfolio_Dashboard.xlsx"
+SL_COLS = ['TYPE', 'Stock', 'Buy_Date', 'Buy_Price', 'SL_Price']
+DATABASE_URL = os.environ.get("DATABASE_URL", "")   # set on Render -> trailing stop-losses live in Postgres
 PASSWORD = os.environ.get("PORTFOLIO_PASSWORD", "admin")  # override via env var in production
 
 # --- AUTHENTICATION ---
@@ -90,13 +92,101 @@ def load_data():
         co = pd.DataFrame(columns=['Stock', 'Manual CMP', 'Note'])
     return tb, co
 
-def save_data(tb_df, co_df):
+# ---- trailing stop-loss ("Shaktiman", tranche 4+): Postgres when DATABASE_URL is set, else the xlsx ----
+def db_connect():
+    import psycopg2
+    return psycopg2.connect(DATABASE_URL, connect_timeout=10)
+
+@st.cache_resource
+def db_init():
+    with db_connect() as conn, conn.cursor() as cur:
+        cur.execute("""CREATE TABLE IF NOT EXISTS manual_sl (
+            type text NOT NULL, stock text NOT NULL, buy_date text NOT NULL, buy_price numeric(14,2) NOT NULL,
+            sl_price numeric(14,2) NOT NULL, updated_at timestamptz NOT NULL DEFAULT now(),
+            PRIMARY KEY (type, stock, buy_date, buy_price))""")
+        cur.execute("""CREATE TABLE IF NOT EXISTS manual_sl_history (
+            id serial PRIMARY KEY, type text NOT NULL, stock text NOT NULL, buy_date text NOT NULL,
+            buy_price numeric(14,2) NOT NULL, sl_price numeric(14,2) NOT NULL,
+            changed_at timestamptz NOT NULL DEFAULT now())""")
+    return True
+
+@st.cache_data(ttl=600)
+def load_manual_sl():
+    if DATABASE_URL:
+        try:
+            db_init()
+            with db_connect() as conn, conn.cursor() as cur:
+                cur.execute("SELECT type, stock, buy_date, buy_price::float, sl_price::float FROM manual_sl")
+                return pd.DataFrame(cur.fetchall(), columns=SL_COLS)
+        except Exception as exc:
+            st.error(f"Could not read the stop-loss database: {exc}")
+            return pd.DataFrame(columns=SL_COLS)
+    try:
+        sl = pd.read_excel(EXCEL_FILE, sheet_name="Manual_SL")
+        return sl.dropna(subset=['Stock'])
+    except Exception:
+        return pd.DataFrame(columns=SL_COLS)
+
+def save_manual_sl(sel_type, sel_stock, entries):
+    """entries = {(buy_date, buy_price): sl_price}; a price of 0 clears that tranche's stop-loss.
+    Postgres: upsert + append a history row whenever the value actually changes."""
+    if DATABASE_URL:
+        db_init()
+        with db_connect() as conn, conn.cursor() as cur:
+            for (d, p), v in entries.items():
+                cur.execute("SELECT sl_price::float FROM manual_sl WHERE type=%s AND stock=%s AND buy_date=%s AND buy_price=%s",
+                            (sel_type, sel_stock, d, p))
+                row = cur.fetchone()
+                old = row[0] if row else 0.0
+                if abs(old - v) < 0.005:
+                    continue
+                if v > 0:
+                    cur.execute("""INSERT INTO manual_sl (type, stock, buy_date, buy_price, sl_price) VALUES (%s,%s,%s,%s,%s)
+                                   ON CONFLICT (type, stock, buy_date, buy_price)
+                                   DO UPDATE SET sl_price = EXCLUDED.sl_price, updated_at = now()""",
+                                (sel_type, sel_stock, d, p, v))
+                else:
+                    cur.execute("DELETE FROM manual_sl WHERE type=%s AND stock=%s AND buy_date=%s AND buy_price=%s",
+                                (sel_type, sel_stock, d, p))
+                cur.execute("INSERT INTO manual_sl_history (type, stock, buy_date, buy_price, sl_price) VALUES (%s,%s,%s,%s,%s)",
+                            (sel_type, sel_stock, d, p, v))
+        load_manual_sl.clear()
+        return
+    # fallback: keep it in the xlsx (resets whenever the app is redeployed)
+    cur_sl = load_manual_sl()
+    if cur_sl.empty:
+        keep = cur_sl
+    else:
+        hit = cur_sl.apply(lambda x: x['TYPE'] == sel_type and x['Stock'] == sel_stock and
+                           (str(x['Buy_Date'])[:10], round(float(x['Buy_Price']), 2)) in entries, axis=1)
+        keep = cur_sl[~hit]
+    add = pd.DataFrame([{'TYPE': sel_type, 'Stock': sel_stock, 'Buy_Date': d, 'Buy_Price': p, 'SL_Price': v}
+                        for (d, p), v in entries.items() if v > 0], columns=SL_COLS)
+    save_data(trades_df, overrides_df, pd.concat([keep, add], ignore_index=True))
+
+@st.cache_data(ttl=600)
+def load_sl_history(sel_type, sel_stock):
+    if not DATABASE_URL:
+        return pd.DataFrame()
+    try:
+        db_init()
+        with db_connect() as conn, conn.cursor() as cur:
+            cur.execute("""SELECT changed_at, buy_date, buy_price::float, sl_price::float FROM manual_sl_history
+                           WHERE type=%s AND stock=%s ORDER BY changed_at DESC, id DESC LIMIT 100""", (sel_type, sel_stock))
+            return pd.DataFrame(cur.fetchall(), columns=['changed_at', 'buy_date', 'buy_price', 'sl_price'])
+    except Exception:
+        return pd.DataFrame()
+
+def save_data(tb_df, co_df, sl_df=None):
     with pd.ExcelWriter(EXCEL_FILE, engine='openpyxl') as writer:
         tb_df.to_excel(writer, sheet_name="Trade_Book", index=False)
         co_df.to_excel(writer, sheet_name="CMP_Override", index=False)
+        if not DATABASE_URL:   # xlsx fallback keeps the manual stop-losses in its own sheet
+            (sl_df if sl_df is not None else load_manual_sl()).to_excel(writer, sheet_name="Manual_SL", index=False)
     st.cache_data.clear()
 
 trades_df, overrides_df = load_data()
+manual_sl_df = load_manual_sl()
 
 # --- LIVE PRICE FETCHING ENGINE ---
 def to_yf_symbol(ticker: str) -> str:
@@ -267,12 +357,14 @@ def get_remaining_lots(df, ptype, stock):
 
     return [l for l in lots if l['remaining'] > 0]
 
-def build_tranche_table(lots, cmp_price):
+def build_tranche_table(lots, cmp_price, manual_sl=None):
     """Builds the tranche-by-tranche breakdown with weighted avg, growth %,
     P/L, and the stop-loss rule:
       Tranche 1        -> 10% below its own buy price
       Tranche 2        -> price that keeps TOTAL risk in rupees the same as Tranche 1's risk
-      Tranche 3 onward -> breakeven (stop loss = cumulative weighted avg cost)
+      Tranche 3        -> breakeven (stop loss = cumulative weighted avg cost)
+      Tranche 4 onward -> "Shaktiman": stop-loss price is entered manually
+                          (manual_sl = {(buy_date_str, buy_price_rounded): price})
     """
     rows = []
     cum_qty = 0.0
@@ -290,15 +382,21 @@ def build_tranche_table(lots, cmp_price):
         cum_investment += investment
         weighted_avg = cum_investment / cum_qty if cum_qty > 0 else 0.0
 
+        is_manual = False
+        date_str = lot['date'].strftime('%Y-%m-%d')
         if tranche_no == 1:
             sl_rule = "10% below buy"
             sl_price = price * 0.90
         elif tranche_no == 2:
             sl_rule = "Residual risk"
             sl_price = weighted_avg - (prev_risk_amount / cum_qty)
-        else:
+        elif tranche_no == 3:
             sl_rule = "Breakeven"
             sl_price = weighted_avg
+        else:
+            sl_rule = "Shaktiman"
+            is_manual = True
+            sl_price = (manual_sl or {}).get((date_str, round(price, 2)), float('nan'))
 
         risk_amount = (weighted_avg - sl_price) * cum_qty
 
@@ -308,7 +406,7 @@ def build_tranche_table(lots, cmp_price):
 
         rows.append({
             'Tranche': tranche_no,
-            'Buy Date': lot['date'].strftime('%Y-%m-%d'),
+            'Buy Date': date_str,
             'Buy Price': price,
             'Qty': qty,
             'Investment': investment,
@@ -320,10 +418,11 @@ def build_tranche_table(lots, cmp_price):
             'Stop-Loss Price': sl_price,
             'Risk Amount (₹)': risk_amount,
             'Tranche P/L (₹)': tranche_pl,
+            'Manual SL': is_manual,
         })
 
         prev_buy_price = price
-        prev_risk_amount = risk_amount
+        prev_risk_amount = risk_amount if pd.notna(risk_amount) else prev_risk_amount
 
     return pd.DataFrame(rows)
 
@@ -395,9 +494,14 @@ def render_compact_table(headers, rows, left_cols=(), auto_width=False, total_la
     body = ""
     for ri, r in enumerate(rows):
         tds = ""
-        for ci, (text, color) in enumerate(r):
+        for ci, cell in enumerate(r):
+            text, color, *rest = cell
+            bg = rest[0] if rest else None
             cls = " class='l'" if ci in left_cols else ""
-            style = f" style='color:{color}; font-weight:600;'" if color else ""
+            if bg:
+                style = f" style='background:{bg}; color:{color or '#000'}; font-weight:700;'"
+            else:
+                style = f" style='color:{color}; font-weight:600;'" if color else ""
             tds += f"<td{cls}{style}>{html_lib.escape(str(text))}</td>"
         tr_cls = " class='tot'" if (total_last and ri == len(rows) - 1) else ""
         body += f"<tr{tr_cls}>{tds}</tr>"
@@ -487,7 +591,7 @@ def kpi_grid(items, small=False):
                   f"<div class='kpi-v' style='color:{value_color or 'inherit'};'>{esc(value)}</div>{sub_html}</div>")
     st.markdown(f"<div class='kpi-grid{' sm' if small else ''}'>{cells}</div>", unsafe_allow_html=True)
 
-def card_html(title=None, right=None, right_color=None, items=(), badge=None, total=False):
+def card_html(title=None, right=None, right_color=None, items=(), badge=None, total=False, bg=None):
     """One mobile card: optional header (title left, headline value right) + a 2-column grid of
     label/value pairs. items: (label, value, color_or_None)."""
     head = ""
@@ -500,7 +604,8 @@ def card_html(title=None, right=None, right_color=None, items=(), badge=None, to
         st_attr = f" style='color:{color};'" if color else ""
         grid += f"<div><span>{esc(label)}</span> <b{st_attr}>{esc(value)}</b></div>"
     grid_html = f"<div class='mc-g'>{grid}</div>" if grid else ""
-    return f"<div class='mc{' tot' if total else ''}'>{head}{grid_html}</div>"
+    bg_attr = f" style='background:{bg}; color:#000;'" if bg else ""
+    return f"<div class='mc{' tot' if total else ''}'{bg_attr}>{head}{grid_html}</div>"
 
 def render_cards(cards):
     st.markdown("".join(cards), unsafe_allow_html=True)
@@ -609,8 +714,9 @@ def go_to_stock(label):
     st.session_state["ind_stock_choice"] = label
 
 def render_holdings_grid(df, ptype):
-    """Holdings table whose Stock names are clickable links to the Individual Stock page.
-    On a phone it becomes one tappable stock link + a small card per holding."""
+    """Core / Satellite holdings. Phone: a tappable stock link + small card per holding.
+    Computer: the same compact bordered table as the Dashboard Overview, with a row of
+    stock buttons above it that open the Individual Stock analysis."""
     if IS_MOBILE:
         for i, (_, r) in enumerate(df.iterrows(), start=1):
             st.button(f"{i}.  {r['Stock']}", key=f"hold_{ptype}_{i}_{r['Stock']}", type="tertiary",
@@ -623,41 +729,26 @@ def render_holdings_grid(df, ptype):
                 ("Alloc", f"{r['Allocation_%']:.1%}", None),
             ])])
         return
-    heads = ['#', 'Stock', 'Units', 'Avg Cost', 'Total Cost', 'CMP', 'Total Value',
-             'Unrealized P/L', 'Realized P/L', 'Net Gain', 'Alloc %']
-    widths = [0.5, 1.8, 0.8, 1.2, 1.3, 1.1, 1.4, 1.4, 1.3, 1.3, 0.9]
-    left = {'#', 'Stock'}
-    hc = st.columns(widths)
-    for c, h in zip(hc, heads):
-        align = 'left' if h in left else 'right'
-        c.markdown(f"<div style='font-weight:700; font-size:13px; text-align:{align};'>{h}</div>",
-                   unsafe_allow_html=True)
-    st.markdown("<hr style='margin:2px 0 4px 0;'>", unsafe_allow_html=True)
 
-    def cell(col, text):
-        col.markdown(f"<div style='font-size:13px; text-align:right;'>{text}</div>", unsafe_allow_html=True)
+    if not df.empty:
+        chips_key = f"open_stock_{ptype}"
 
-    for i, (_, r) in enumerate(df.iterrows(), start=1):
-        cols = st.columns(widths, vertical_alignment="center")
-        cols[0].markdown(f"<div style='font-size:13px;'>{i}</div>", unsafe_allow_html=True)
-        cols[1].button(str(r['Stock']), key=f"hold_{ptype}_{i}_{r['Stock']}", type="tertiary",
-                       on_click=go_to_stock, args=(f"{ptype} — {r['Stock']}",))
-        cell(cols[2], f"{int(r['Units']):,}")
-        cell(cols[3], f"₹{r['Avg_Cost']:,.2f}")
-        cell(cols[4], f"₹{r['Total_Cost']:,.2f}")
-        cell(cols[5], f"₹{r['CMP']:,.2f}")
-        cell(cols[6], f"₹{r['Total_Value']:,.2f}")
-        cell(cols[7], f"₹{r['Unrealized_PL']:,.2f}")
-        cell(cols[8], f"₹{r['Realized_PL']:,.2f}")
-        cell(cols[9], f"₹{r['Total_Net_Gain']:,.2f}")
-        cell(cols[10], f"{r['Allocation_%']:.1%}")
+        def _open_from_chips():
+            picked = st.session_state.get(chips_key)
+            if picked:
+                go_to_stock(f"{ptype} — {picked}")
+
+        st.pills("🔍 Open a stock's analysis", df['Stock'].tolist(), selection_mode="single",
+                 key=chips_key, on_change=_open_from_chips)
+    render_overview_open("", df, heading=False)
 
 def day_change_total(df):
     s = df['Day_Change']
     return s.sum() if s.notna().any() else float('nan')
 
-def render_overview_open(title, df):
-    st.markdown(f"#### {title} ({len(df)})")
+def render_overview_open(title, df, heading=True):
+    if heading:
+        st.markdown(f"#### {title} ({len(df)})")
     if df.empty:
         st.caption("No open positions.")
         return
@@ -770,6 +861,42 @@ def render_overview_booked(title, df, trades):
         rows, left_cols=(1, 2), total_last=True, font_px=13
     )
 
+def render_pl_booked(title, df, is_loss):
+    """Squared-off stocks only. Avg_Cost = average buy price of the units sold (FIFO).
+    The Realized_PL total at the bottom is highlighted (red for losses, green for profits)."""
+    st.markdown(f"#### {title} ({len(df)})")
+    if df.empty:
+        st.caption("None yet.")
+        return
+    total = df['Realized_PL'].sum()
+    tint, ink = ("#FDE2E2", "#B71C1C") if is_loss else ("#DFF5E1", "#1B5E20")
+    if IS_MOBILE:
+        cards = []
+        for i, (_, r) in enumerate(df.iterrows(), start=1):
+            c = pl_color(r['Realized_PL'])
+            cards.append(card_html(
+                title=f"{i}. {r['Stock']}", badge=r['Type'], right=money(r['Realized_PL']), right_color=c,
+                items=[("Avg cost", money(r['Avg_Cost']), None), ("CMP", money(r['CMP']), None)]))
+        cards.append(card_html(title="Total Realized_PL", right=money(total), right_color=ink,
+                               total=True, bg=tint))
+        render_cards(cards)
+        return
+    rows = []
+    for i, (_, r) in enumerate(df.iterrows(), start=1):
+        rows.append([
+            (i, None), (r['Type'], None), (r['Stock'], None),
+            (money(r['Avg_Cost']), None), (money(r['Total_Cost']), None), (money(r['CMP']), None),
+            (money(r['Total_Value']), None), (money(r['Unrealized_PL']), None),
+            (money(r['Realized_PL']), pl_color(r['Realized_PL'])), (money(r['Total_Net_Gain']), None),
+        ])
+    rows.append([("", None), ("", None), ("Total", None), ("", None), ("", None), ("", None),
+                 ("", None), ("", None), (money(total), ink, tint), ("", None)])
+    render_compact_table(
+        ['#', 'Type', 'Stock', 'Avg_Cost', 'Total_Cost', 'CMP', 'Total_Value',
+         'Unrealized_PL', 'Realized_PL', 'Total_Net_Gain'],
+        rows, left_cols=(1, 2), total_last=True, font_px=13
+    )
+
 if page == "Dashboard Overview":
     st.subheader("📊 Dashboard Overview")
     if portfolio_df.empty:
@@ -788,7 +915,6 @@ elif page == "Core Holdings":
     st.subheader("🎯 Core Holdings")
     core = portfolio_df[(portfolio_df['Type'] == 'CORE') & (portfolio_df['Units'] > 0)].drop(columns=['Type']).reset_index(drop=True)
     core.index = core.index + 1
-    st.caption("Click a stock name to open its Individual Stock analysis.")
     render_holdings_grid(core, 'CORE')
     render_totals_bar(core, '#1F77B4')
 
@@ -796,19 +922,22 @@ elif page == "Satellite Holdings":
     st.subheader("🚀 Satellite Holdings")
     sat = portfolio_df[(portfolio_df['Type'] == 'SATELLITE') & (portfolio_df['Units'] > 0)].drop(columns=['Type']).reset_index(drop=True)
     sat.index = sat.index + 1
-    st.caption("Click a stock name to open its Individual Stock analysis.")
     render_holdings_grid(sat, 'SATELLITE')
     render_totals_bar(sat, '#D62728')
 
 elif page == "Profit/Loss":
-    st.subheader("🔻 Booked Losses & Closed Positions")
-    closed = portfolio_df[(portfolio_df['Units'] == 0) & (portfolio_df['Realized_PL'] < 0)]
-    if IS_MOBILE:
-        st.dataframe(closed[['Stock', 'Type', 'Realized_PL']].style.format(FORMAT_DICT),
-                     use_container_width=True, hide_index=True)
-    else:
-        st.dataframe(closed.drop(columns=['Yest_Close', 'Day_Change']).style.format(FORMAT_DICT),
-                     use_container_width=True)
+    st.subheader("📉 Profit / Loss Booked")
+    squared = portfolio_df[portfolio_df['Units'] == 0].copy()
+    avg_costs = []
+    for _, r in squared.iterrows():
+        lots_done = build_closed_lots_table(processed_trades, r['Type'], r['Stock'])
+        qty = lots_done['Qty'].sum() if not lots_done.empty else 0
+        avg_costs.append(lots_done['Invested'].sum() / qty if qty else 0.0)
+    squared['Avg_Cost'] = avg_costs
+    render_pl_booked("🔻 Booked Losses & Closed Positions",
+                     squared[squared['Realized_PL'] < 0].sort_values('Realized_PL'), is_loss=True)
+    render_pl_booked("🟢 Booked Profits & Closed Positions",
+                     squared[squared['Realized_PL'] > 0].sort_values('Realized_PL', ascending=False), is_loss=False)
 
 elif page == "Individual Stock":
     st.subheader("🔍 Individual Stock Analysis")
@@ -856,31 +985,49 @@ elif page == "Individual Stock":
         if not lots:
             st.info("No open position — this stock is fully squared off. Its realized results are below.")
         else:
-            tranche_df = build_tranche_table(lots, cmp_price)
+            stock_manual = {}
+            if not manual_sl_df.empty:
+                msub = manual_sl_df[(manual_sl_df['TYPE'] == sel_type) & (manual_sl_df['Stock'] == sel_stock)]
+                for _, mr in msub.iterrows():
+                    stock_manual[(str(mr['Buy_Date'])[:10], round(float(mr['Buy_Price']), 2))] = float(mr['SL_Price'])
+            tranche_df = build_tranche_table(lots, cmp_price, manual_sl=stock_manual)
 
             total_qty = tranche_df['Cum. Qty'].iloc[-1]
             total_investment = tranche_df['Investment'].sum()
             weighted_avg = tranche_df['Weighted Avg Cost'].iloc[-1]
             current_sl_price = tranche_df['Stop-Loss Price'].iloc[-1]
             current_risk = tranche_df['Risk Amount (₹)'].iloc[-1]
+            sl_pending = pd.isna(current_sl_price)
             current_val = total_qty * cmp_price
             current_pl = current_val - total_investment
             current_pl_pct = (current_pl / total_investment) if total_investment > 0 else 0
 
+            if sl_pending:
+                sl_value, sl_sub, sl_sub_color = "—", "Enter the Shaktiman SL below", "#B26A00"
+            elif current_risk > 0:
+                sl_value, sl_sub, sl_sub_color = money(current_sl_price), f"Risk ₹{current_risk:,.2f}", DOWN
+            elif current_risk < 0:
+                sl_value, sl_sub, sl_sub_color = money(current_sl_price), f"Locks in ₹{abs(current_risk):,.2f} profit", UP
+            else:
+                sl_value, sl_sub, sl_sub_color = money(current_sl_price), "Risk-free (breakeven)", UP
             kpi_grid([
                 ("CMP", money(cmp_price), None, None),
                 ("Weighted Avg Cost", money(weighted_avg), None, None),
                 ("Unrealized P&L", money(current_pl), f"{current_pl_pct*100:+.2f}%", pl_color(current_pl)),
-                ("Current Stop-Loss", money(current_sl_price),
-                 f"Risk ₹{current_risk:,.2f}" if current_risk > 0 else "Risk-free (breakeven)",
-                 DOWN if current_risk > 0 else UP),
+                ("Current Stop-Loss", sl_value, sl_sub, sl_sub_color),
             ])
 
             st.markdown("#### Tranche Breakdown & Stop-Loss (open position)")
+            MANUAL_BG = "#FFE08A"   # yellow = enter this cell by hand
             t_rows = []
             for _, r in tranche_df.iterrows():
                 gp, gc = r['Growth % vs Prev Tranche'], r['Growth % vs CMP']
                 pl = r['Tranche P/L (₹)']
+                sl_p, risk = r['Stop-Loss Price'], r['Risk Amount (₹)']
+                if r['Manual SL']:
+                    sl_cell = (("enter ↓" if pd.isna(sl_p) else fmt_num(sl_p)), None, MANUAL_BG)
+                else:
+                    sl_cell = (fmt_num(sl_p), None)
                 t_rows.append([
                     (int(r['Tranche']), None), (r['Buy Date'], None),
                     (fmt_num(r['Buy Price']), None), (fmt_num(r['Qty'], 0), None),
@@ -889,8 +1036,8 @@ elif page == "Individual Stock":
                     ("—" if pd.isna(gp) else f"{gp:.1%}", None),
                     ("—" if pd.isna(gc) else f"{gc:.1%}", GREEN if gc >= 0 else RED),
                     (r['Stop-Loss Rule'], None),
-                    (fmt_num(r['Stop-Loss Price']), None),
-                    (fmt_num(r['Risk Amount (₹)'], 0), None),
+                    sl_cell,
+                    ("—" if pd.isna(risk) else fmt_num(risk, 0), None),
                     (fmt_num(pl, 0), GREEN if pl >= 0 else RED),
                 ])
             render_compact_table(
@@ -899,7 +1046,46 @@ elif page == "Individual Stock":
                 t_rows, left_cols=(1, 9)
             )
             st.caption("SL rule: Tranche 1 = 10% below its buy price · Tranche 2 = same ₹ risk as "
-                       "Tranche 1 · Tranche 3+ = breakeven (avg cost of all tranches).")
+                       "Tranche 1 · Tranche 3 = breakeven (avg cost of all tranches) · "
+                       "Tranche 4+ = Shaktiman — stop-loss entered by hand (yellow cell).")
+
+            manual_rows = tranche_df[tranche_df['Manual SL']]
+            if not manual_rows.empty:
+                st.markdown("##### ✍️ Shaktiman stop-loss — enter by hand")
+                with st.form(f"sl_form_{sel_type}_{sel_stock}"):
+                    entries = {}
+                    for _, mr in manual_rows.iterrows():
+                        existing = mr['Stop-Loss Price']
+                        entries[(mr['Buy Date'], round(float(mr['Buy Price']), 2))] = st.number_input(
+                            f"Tranche {int(mr['Tranche'])} — bought {mr['Buy Date']} @ ₹{mr['Buy Price']:,.2f}",
+                            min_value=0.0, value=0.0 if pd.isna(existing) else float(existing),
+                            step=0.05, format="%.2f",
+                            key=f"sl_{sel_type}_{sel_stock}_{mr['Buy Date']}_{mr['Buy Price']}")
+                    if st.form_submit_button("💾 Save stop-loss"):
+                        try:
+                            save_manual_sl(sel_type, sel_stock, entries)
+                            load_sl_history.clear()
+                        except Exception as exc:
+                            st.error(f"Could not save the stop-loss: {exc}")
+                        else:
+                            st.rerun()
+                if DATABASE_URL:
+                    st.caption("Saved in the database — your trailing stop-loss values survive every deploy.")
+                else:
+                    st.caption("⚠️ No database connected: values are kept in the app file and reset on deploy.")
+                hist = load_sl_history(sel_type, sel_stock)
+                if not hist.empty:
+                    with st.expander(f"🕘 Stop-loss history ({len(hist)} changes)"):
+                        h_rows = []
+                        for _, hr in hist.iterrows():
+                            ts = pd.Timestamp(hr['changed_at']).tz_convert('Asia/Kolkata')
+                            h_rows.append([
+                                (f"{ts.day}-{ts.strftime('%b-%Y %H:%M')}", None),
+                                (f"{hr['buy_date']} @ ₹{hr['buy_price']:,.2f}", None),
+                                ("cleared" if hr['sl_price'] == 0 else money(hr['sl_price']), None),
+                            ])
+                        render_compact_table(['When (IST)', 'Tranche (bought)', 'Stop-loss ₹'], h_rows,
+                                             left_cols=(0, 1), auto_width=True)
 
             st.markdown("#### Profit Target Ladder")
             pcts = [10, 15, 20, 25]
@@ -911,7 +1097,9 @@ elif page == "Individual Stock":
 
             st.markdown("#### Risk : Reward")
             reward_15pct = total_investment * 0.15
-            if current_risk > 0:
+            if sl_pending:
+                st.caption("Enter the Shaktiman stop-loss above to see Risk : Reward.")
+            elif current_risk > 0:
                 ratio = reward_15pct / current_risk
                 st.markdown(
                     f"<p style='font-size:20px; font-weight:800; color:#8B0000;'>"
