@@ -765,27 +765,14 @@ FORMAT_DICT = {
 }
 
 def render_totals_bar(df, color):
-    st.markdown(
-        f"""
-        <div style='display:flex; justify-content:space-between; flex-wrap:wrap;
-                    padding:14px 18px; margin-top:10px; background-color:#F5F5F5;
-                    border-top:3px solid {color}; border-radius:4px;'>
-            <div style='font-size:20px; font-weight:800; color:{color};'>
-                Total Cost: ₹{df['Total_Cost'].sum():,.2f}
-            </div>
-            <div style='font-size:20px; font-weight:800; color:{color};'>
-                Unrealized P&L: ₹{df['Unrealized_PL'].sum():,.2f}
-            </div>
-            <div style='font-size:20px; font-weight:800; color:{color};'>
-                Realized P&L: ₹{df['Realized_PL'].sum():,.2f}
-            </div>
-            <div style='font-size:20px; font-weight:800; color:{color};'>
-                Total Net Gain: ₹{df['Total_Net_Gain'].sum():,.2f}
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
+    """Bottom-of-page totals as four small tiles."""
+    unreal, real, net = df['Unrealized_PL'].sum(), df['Realized_PL'].sum(), df['Total_Net_Gain'].sum()
+    kpi_grid([
+        ("Total Cost", money(df['Total_Cost'].sum()), None, None),
+        ("Unrealized P&L", money(unreal), None, None, pl_color(unreal)),
+        ("Realized P&L", money(real), None, None, pl_color(real)),
+        ("Total Net Gain", money(net), None, None, pl_color(net)),
+    ], small=True)
 
 def go_to_stock(label):
     """Button callback: jump to the Individual Stock page with this stock pre-selected."""
@@ -832,13 +819,13 @@ def render_holdings_grid(df, ptype):
         return
 
     stock_link_pills(ptype, df['Stock'].tolist(), f"open_stock_{ptype}")
-    render_overview_open("", df, heading=False, sum_value_alloc=True)
+    render_overview_open("", df, heading=False, sum_value_alloc=True, fit=True)
 
 def day_change_total(df):
     s = df['Day_Change']
     return s.sum() if s.notna().any() else float('nan')
 
-def render_overview_open(title, df, heading=True, sum_value_alloc=False, link_type=None):
+def render_overview_open(title, df, heading=True, sum_value_alloc=False, link_type=None, fit=False):
     if heading:
         st.markdown(f"#### {title} ({len(df)})")
     if df.empty:
@@ -893,7 +880,7 @@ def render_overview_open(title, df, heading=True, sum_value_alloc=False, link_ty
     render_compact_table(
         ['#', 'Stock', 'Units', 'Avg_Cost', 'Total_Cost', 'CMP', 'Yest_Close', '1_Day_Change',
          'Total_Value', 'Unrealized_PL', 'Realized_PL', 'Total_Net_Gain', 'Allocation_%'],
-        rows, left_cols=(1,), total_last=True, font_px=12 if link_type else 13, fit=bool(link_type)
+        rows, left_cols=(1,), total_last=True, font_px=12 if (link_type or fit) else 13, fit=bool(link_type) or fit
     )
 
 def render_day_change_summary(core_df, sat_df):
