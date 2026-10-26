@@ -728,6 +728,9 @@ def render_holdings_grid(df, ptype):
                 ("Realized", money(r['Realized_PL']), None), ("Net gain", money(r['Total_Net_Gain']), None),
                 ("Alloc", f"{r['Allocation_%']:.1%}", None),
             ])])
+        render_cards([card_html(title="Total", right=money(df['Total_Value'].sum()), total=True,
+                                items=[("Total value", money(df['Total_Value'].sum()), None),
+                                       ("Allocation", f"{df['Allocation_%'].sum():.1%}", None)])])
         return
 
     if not df.empty:
@@ -740,13 +743,13 @@ def render_holdings_grid(df, ptype):
 
         st.pills("🔍 Open a stock's analysis", df['Stock'].tolist(), selection_mode="single",
                  key=chips_key, on_change=_open_from_chips)
-    render_overview_open("", df, heading=False)
+    render_overview_open("", df, heading=False, sum_value_alloc=True)
 
 def day_change_total(df):
     s = df['Day_Change']
     return s.sum() if s.notna().any() else float('nan')
 
-def render_overview_open(title, df, heading=True):
+def render_overview_open(title, df, heading=True, sum_value_alloc=False):
     if heading:
         st.markdown(f"#### {title} ({len(df)})")
     if df.empty:
@@ -776,11 +779,16 @@ def render_overview_open(title, df, heading=True):
             (f"{r['Allocation_%']:.1%}", None),
         ])
     tot = day_change_total(df)
+    val_sum, alloc_sum = df['Total_Value'].sum(), df['Allocation_%'].sum()
     if IS_MOBILE:
-        cards.append(card_html(title="Total 1_Day_Change", right=money(tot), right_color=pl_color(tot), total=True))
+        extra = [("Total value", money(val_sum), None), ("Allocation", f"{alloc_sum:.1%}", None)] if sum_value_alloc else []
+        cards.append(card_html(title="Total 1_Day_Change", right=money(tot), right_color=pl_color(tot),
+                               items=extra, total=True))
         render_cards(cards)
         return
-    rows.append([("", None), ("Total", None)] + [("", None)] * 5 + [(money(tot), pl_color(tot))] + [("", None)] * 5)
+    tail = ([(money(val_sum), None)] + [("", None)] * 3 + [(f"{alloc_sum:.1%}", None)]) if sum_value_alloc \
+        else [("", None)] * 5
+    rows.append([("", None), ("Total", None)] + [("", None)] * 5 + [(money(tot), pl_color(tot))] + tail)
     render_compact_table(
         ['#', 'Stock', 'Units', 'Avg_Cost', 'Total_Cost', 'CMP', 'Yest_Close', '1_Day_Change',
          'Total_Value', 'Unrealized_PL', 'Realized_PL', 'Total_Net_Gain', 'Allocation_%'],
@@ -1016,6 +1024,12 @@ elif page == "Individual Stock":
                 ("Unrealized P&L", money(current_pl), f"{current_pl_pct*100:+.2f}%", pl_color(current_pl)),
                 ("Current Stop-Loss", sl_value, sl_sub, sl_sub_color),
             ])
+            kpi_grid([
+                ("Total Invested Amount", money(total_investment), None, None),
+                ("Current Value", money(current_val), None, None),
+                ("Appreciation", f"{current_pl_pct*100:+.2f}%", money(current_pl), pl_color(current_pl),
+                 pl_color(current_pl)),
+            ], small=True)
 
             st.markdown("#### Tranche Breakdown & Stop-Loss (open position)")
             MANUAL_BG = "#FFE08A"   # yellow = enter this cell by hand
