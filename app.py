@@ -515,9 +515,30 @@ def do_logout():
 def do_refresh():
     st.cache_data.clear()
 
+NAV_LABELS = {
+    "Dashboard Overview": "🏠 Overview", "Core Holdings": "🎯 Core", "Satellite Holdings": "🚀 Satellite",
+    "Profit/Loss": "📉 Profit/Loss", "Individual Stock": "🔍 Stock", "Trade Book": "📒 Trade Book",
+    "Add Trade": "➕ Add Trade", "CMP Overrides": "⚙️ CMP",
+}
+
+def _nav_changed():
+    """Phone menu: tapping the highlighted button again would clear the choice; keep the current page."""
+    v = st.session_state.get("nav_page")
+    if v is None:
+        st.session_state["nav_page"] = st.session_state.get("_last_page", PAGES[0])
+    else:
+        st.session_state["_last_page"] = v
+
 if IS_MOBILE:
-    page = st.selectbox("Menu", PAGES, key="nav_page", label_visibility="collapsed")
-    with st.expander("⚙️ Options"):
+    st.session_state.setdefault("nav_page", PAGES[0])
+    st.session_state.setdefault("_last_page", st.session_state["nav_page"])
+    # every menu link is visible at once (wraps onto a few rows) — one tap to switch page
+    page = st.pills("Menu", PAGES, selection_mode="single", key="nav_page",
+                    format_func=lambda p: NAV_LABELS[p], label_visibility="collapsed",
+                    on_change=_nav_changed)
+    if page is None:
+        page = st.session_state.get("_last_page", PAGES[0])
+    with st.expander("🔄 Refresh prices / Logout"):
         st.button("🔄 Refresh Prices", on_click=do_refresh, use_container_width=True)
         st.button("Logout", on_click=do_logout, use_container_width=True)
 else:
@@ -584,6 +605,7 @@ def render_totals_bar(df, color):
 def go_to_stock(label):
     """Button callback: jump to the Individual Stock page with this stock pre-selected."""
     st.session_state["nav_page"] = "Individual Stock"
+    st.session_state["_last_page"] = "Individual Stock"
     st.session_state["ind_stock_choice"] = label
 
 def render_holdings_grid(df, ptype):
