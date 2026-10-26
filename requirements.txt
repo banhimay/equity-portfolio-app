@@ -2,3 +2,4 @@ streamlit
 pandas
 yfinance
 openpyxl
+psycopg2-binary
