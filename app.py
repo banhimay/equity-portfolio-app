@@ -866,10 +866,10 @@ def render_overview_open(title, df, heading=True, sum_value_alloc=False, link_ty
         ])
     tot = day_change_total(df)
     val_sum, alloc_sum, cost_sum = df['Total_Value'].sum(), df['Allocation_%'].sum(), df['Total_Cost'].sum()
+    unreal_sum = df['Unrealized_PL'].sum()
     if IS_MOBILE:
-        extra = [("Total invested", money(cost_sum), None), ("Total value", money(val_sum), None)]
-        if sum_value_alloc:
-            extra.append(("Allocation", f"{alloc_sum:.1%}", None))
+        extra = [("Total invested", money(cost_sum), None), ("Total value", money(val_sum), None),
+                 ("Unrealized", money(unreal_sum), pl_color(unreal_sum)), ("Allocation", f"{alloc_sum:.1%}", None)]
         total_card = card_html(title="Total 1_Day_Change", right=money(tot), right_color=pl_color(tot),
                                items=extra, total=True)
         if link_type:
@@ -881,8 +881,8 @@ def render_overview_open(title, df, heading=True, sum_value_alloc=False, link_ty
         else:
             render_cards(cards + [total_card])
         return
-    tail = [(money(val_sum), None), ("", None), ("", None), ("", None),
-            (f"{alloc_sum:.1%}" if sum_value_alloc else "", None)]
+    tail = [(money(val_sum), None), (money(unreal_sum), pl_color(unreal_sum)), ("", None), ("", None),
+            (f"{alloc_sum:.1%}", None)]
     rows.append([("", None), ("Total", None), ("", None), ("", None), (money(cost_sum), None), ("", None), ("", None),
                  (money(tot), pl_color(tot))] + tail)
     render_compact_table(
