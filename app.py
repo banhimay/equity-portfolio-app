@@ -67,7 +67,7 @@ st.markdown(
     ".mc-g b{font-weight:600;}"
     ".cmp-wrap{-webkit-overflow-scrolling:touch;}"
     "@media (max-width:640px){"
-    ".block-container,[data-testid='stMainBlockContainer']{padding:0.8rem 0.6rem 3rem 0.6rem !important;}"
+    ".block-container,[data-testid='stMainBlockContainer']{padding:4.5rem 0.6rem 3rem 0.6rem !important;}"
     "h2{font-size:1.35rem !important;}h3{font-size:1.2rem !important;}h4{font-size:1.05rem !important;}"
     "[data-testid='stVerticalBlock']{gap:0.5rem !important;}"
     "}"
