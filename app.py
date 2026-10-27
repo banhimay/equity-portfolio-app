@@ -157,7 +157,96 @@ def db_init():
             tb, co = _load_data_xlsx()
             _db_write_trades(cur, tb, co)
             cur.execute("INSERT INTO app_meta (key, value) VALUES ('trades_seeded', now()::text)")
+        cur.execute("""CREATE TABLE IF NOT EXISTS cash_entries (
+            id serial PRIMARY KEY, account text NOT NULL, kind text NOT NULL, entry_date date, label text,
+            amount numeric(14,2) NOT NULL)""")
+        cur.execute("""CREATE TABLE IF NOT EXISTS account_cash (
+            account text PRIMARY KEY, cash_balance numeric(14,2) NOT NULL, updated_at timestamptz NOT NULL DEFAULT now())""")
+        cur.execute("SELECT 1 FROM app_meta WHERE key='cashflow_seeded'")
+        if cur.fetchone() is None:   # first run: load the two accounts' history supplied by the user, once
+            for acct, kind, d, amt in CASH_SEED_DATED:
+                cur.execute("INSERT INTO cash_entries (account, kind, entry_date, amount) VALUES (%s,%s,%s,%s)",
+                            (acct, kind, d, amt))
+            for acct, label, amt in CASH_SEED_CHARGES:
+                cur.execute("INSERT INTO cash_entries (account, kind, label, amount) VALUES (%s,'CHARGE',%s,%s)",
+                            (acct, label, amt))
+            for acct, amt in CASH_SEED_BALANCE.items():
+                cur.execute("INSERT INTO account_cash (account, cash_balance) VALUES (%s,%s)", (acct, amt))
+            cur.execute("INSERT INTO app_meta (key, value) VALUES ('cashflow_seeded', now()::text)")
     return True
+
+ACCOUNTS = ["YWA415", "JAE735"]
+# one-time starting data (from the user's sheet): (account, kind, date, amount)
+_YWA_DEP = [("2025-06-24", 70000), ("2025-07-28", 10000), ("2025-09-03", 20000), ("2025-09-22", 10000),
+            ("2025-10-06", 10000), ("2025-10-21", 20000), ("2025-11-03", 5000), ("2025-12-15", 10000),
+            ("2025-12-26", 15000), ("2026-01-20", 50000), ("2026-04-20", 45000), ("2026-05-08", 40000),
+            ("2026-05-22", 30000), ("2026-06-05", 20000), ("2026-06-29", 20000), ("2026-08-21", 50000)]
+_YWA_BACK = [("2025-10-03", 85), ("2026-01-02", 4371), ("2026-04-18", 12627)]
+_JAE_DEP = [("2025-09-26", 1000), ("2025-10-10", 25000), ("2025-10-21", 35000), ("2025-11-21", 50000),
+            ("2025-11-28", 2000), ("2025-12-18", 7000), ("2026-02-09", 30000), ("2026-04-17", 70000),
+            ("2026-05-15", 30000), ("2026-08-17", 50000)]
+_JAE_BACK = [("2025-10-03", 911), ("2026-01-02", 6979)]
+CASH_SEED_DATED = ([("YWA415", "DEPOSIT", d, v) for d, v in _YWA_DEP] + [("YWA415", "TRANSFER_BACK", d, v) for d, v in _YWA_BACK] +
+                   [("JAE735", "DEPOSIT", d, v) for d, v in _JAE_DEP] + [("JAE735", "TRANSFER_BACK", d, v) for d, v in _JAE_BACK])
+CASH_SEED_CHARGES = [("YWA415", "2025-26", 1490), ("YWA415", "2026-27", 1112),
+                     ("JAE735", "2025-26", 719), ("JAE735", "2026-27", 943)]
+CASH_SEED_BALANCE = {"YWA415": 18651, "JAE735": 10684}
+
+@st.cache_data(ttl=600)
+def load_cash():
+    """(entries, balances) for the Cash Flow page. Needs the database."""
+    db_init()
+    with db_connect() as conn, conn.cursor() as cur:
+        cur.execute("SELECT id, account, kind, entry_date, label, amount::float FROM cash_entries ORDER BY entry_date NULLS LAST, id")
+        ent = pd.DataFrame(cur.fetchall(), columns=['id', 'account', 'kind', 'date', 'label', 'amount'])
+        cur.execute("SELECT account, cash_balance::float FROM account_cash")
+        bal = dict(cur.fetchall())
+    ent['date'] = pd.to_datetime(ent['date'])
+    return ent, bal
+
+def cash_add_entry(account, kind, d, amount):
+    db_init()
+    with db_connect() as conn, conn.cursor() as cur:
+        cur.execute("INSERT INTO cash_entries (account, kind, entry_date, amount) VALUES (%s,%s,%s,%s)", (account, kind, d, amount))
+    load_cash.clear()
+
+def cash_delete_entry(entry_id):
+    db_init()
+    with db_connect() as conn, conn.cursor() as cur:
+        cur.execute("DELETE FROM cash_entries WHERE id=%s", (int(entry_id),))
+    load_cash.clear()
+
+def cash_set_charge(account, label, amount):
+    """One charges figure per account per financial year: update it if it exists, else add it."""
+    db_init()
+    with db_connect() as conn, conn.cursor() as cur:
+        cur.execute("UPDATE cash_entries SET amount=%s WHERE account=%s AND kind='CHARGE' AND label=%s", (amount, account, label))
+        if cur.rowcount == 0:
+            cur.execute("INSERT INTO cash_entries (account, kind, label, amount) VALUES (%s,'CHARGE',%s,%s)", (account, label, amount))
+    load_cash.clear()
+
+def cash_get_override():
+    """(exposed, equity_value) typed in by the user, or None to use the app's own holdings."""
+    db_init()
+    with db_connect() as conn, conn.cursor() as cur:
+        cur.execute("SELECT key, value FROM app_meta WHERE key IN ('cf_exposed', 'cf_equity')")
+        d = dict(cur.fetchall())
+    return (float(d['cf_exposed']), float(d['cf_equity'])) if 'cf_exposed' in d and 'cf_equity' in d else None
+
+def cash_set_override(exposed, equity):
+    """Pass None to go back to the app's holdings."""
+    db_init()
+    with db_connect() as conn, conn.cursor() as cur:
+        cur.execute("DELETE FROM app_meta WHERE key IN ('cf_exposed', 'cf_equity')")
+        if exposed is not None:
+            cur.execute("INSERT INTO app_meta (key, value) VALUES ('cf_exposed', %s), ('cf_equity', %s)", (str(exposed), str(equity)))
+
+def cash_set_balance(account, amount):
+    db_init()
+    with db_connect() as conn, conn.cursor() as cur:
+        cur.execute("""INSERT INTO account_cash (account, cash_balance) VALUES (%s,%s)
+                       ON CONFLICT (account) DO UPDATE SET cash_balance=EXCLUDED.cash_balance, updated_at=now()""", (account, amount))
+    load_cash.clear()
 
 @st.cache_data(ttl=600)
 def load_manual_sl():
@@ -692,7 +781,7 @@ def render_cards(cards):
 
 # --- NAVIGATION ---
 PAGES = ["Dashboard Overview", "Core Holdings", "Satellite Holdings",
-         "Profit/Loss", "Individual Stock", "Trailing Stop Loss", "Trade Book & Add Trade", "CMP Overrides"]
+         "Profit/Loss", "Individual Stock", "Trailing Stop Loss", "Trade Book & Add Trade", "Cash Flow", "CMP Overrides"]
 
 def do_logout():
     st.session_state["authenticated"] = False
@@ -702,7 +791,7 @@ def do_refresh():
 
 NAV_LABELS = {
     "Dashboard Overview": "🏠 Overview", "Core Holdings": "🎯 Core", "Satellite Holdings": "🚀 Satellite",
-    "Profit/Loss": "📉 Profit/Loss", "Individual Stock": "🔍 Stock", "Trailing Stop Loss": "🛡️ Trailing SL", "Trade Book & Add Trade": "📒 Trades",
+    "Profit/Loss": "📉 Profit/Loss", "Individual Stock": "🔍 Stock", "Trailing Stop Loss": "🛡️ Trailing SL", "Trade Book & Add Trade": "📒 Trades", "Cash Flow": "💰 Cash Flow",
     "CMP Overrides": "⚙️ CMP",
 }
 
@@ -1537,6 +1626,165 @@ elif page == "Add Trade":
                 f"Added trade for {stock} — this is a NEW symbol (first trade for it). "
                 f"If that was a typo, tell me and I'll fix the Trade Book.")
             st.rerun()
+
+elif page == "Cash Flow":
+    st.subheader("💰 Cash Flow")
+    if not DATABASE_URL:
+        st.info("The Cash Flow page needs the database (DATABASE_URL), which is not connected here.")
+        st.stop()
+    try:
+        ent, bal = load_cash()
+    except Exception as exc:
+        st.error(f"Could not read the cash-flow data: {exc}")
+        st.stop()
+
+    def _sum(df, kind):
+        return float(df.loc[df['kind'] == kind, 'amount'].sum()) if not df.empty else 0.0
+
+    held = portfolio_df[portfolio_df['Units'] > 0] if not portfolio_df.empty else portfolio_df
+    exposed = float(held['Total_Cost'].sum()) if len(held) else 0.0
+    equity_val = float(held['Total_Value'].sum()) if len(held) else 0.0
+    ovr = cash_get_override()
+    if ovr:
+        exposed, equity_val = ovr
+    dep, back, chg = _sum(ent, 'DEPOSIT'), _sum(ent, 'TRANSFER_BACK'), _sum(ent, 'CHARGE')
+    cash_total = float(sum(bal.get(a, 0.0) for a in ACCOUNTS))
+    net_dep = dep - back
+    total_value = exposed + cash_total
+    gross = equity_val + cash_total - net_dep
+    net_profit = gross - chg
+    ret = (net_profit / net_dep) if net_dep else float('nan')
+
+    st.markdown("#### Both accounts together")
+    kpi_grid([
+        ("Total Amount Deployed", money(dep), None, None),
+        ("Total Transferred Back", money(back), None, None),
+        ("Net Deployed", money(net_dep), None, None),
+    ])
+    kpi_grid([
+        ("Exposed (Invested)", money(exposed), None, None),
+        ("Cash Balance", money(cash_total), None, None),
+        ("Total Value (invested + cash)", money(total_value), None, None),
+        ("Equity Value on date", money(equity_val), None, None),
+    ])
+    kpi_grid([
+        ("Gross Profit", money(gross), None, None, pl_color(gross)),
+        ("Charges Total", money(chg), None, None),
+        ("Net Profit", money(net_profit), None, None, pl_color(net_profit)),
+        ("Return on Net Deployed", "-" if pd.isna(ret) else f"{ret:.2%}", None, None, pl_color(net_profit)),
+    ])
+    st.caption(("Exposed and Equity Value are the figures you typed in (see ✏️ below)." if ovr else
+                "Exposed and Equity Value come from the holdings in this app (both accounts together).") +
+               " Gross Profit = Equity Value + Cash Balance − Net Deployed. Net Profit = Gross Profit − Charges.")
+
+    for acct in ACCOUNTS:
+        a_ent = ent[ent['account'] == acct]
+        a_dep, a_back, a_chg = _sum(a_ent, 'DEPOSIT'), _sum(a_ent, 'TRANSFER_BACK'), _sum(a_ent, 'CHARGE')
+        st.markdown(f"#### {acct}")
+        kpi_grid([
+            ("Deposits", money(a_dep), None, None),
+            ("Transferred Back", money(a_back), None, None),
+            ("Net Deployed", money(a_dep - a_back), None, None),
+            ("Charges", money(a_chg), None, None),
+            ("Cash Balance", money(bal.get(acct, 0.0)), None, None),
+        ])
+
+        def _dated_rows(kind):
+            sub = a_ent[a_ent['kind'] == kind]
+            rows = [[(i, None), (fmt_date(r['date']), None), (money(r['amount']), None)]
+                    for i, (_, r) in enumerate(sub.iterrows(), start=1)]
+            rows.append([("", None), ("Total", None), (money(float(sub['amount'].sum())), None)])
+            return rows
+
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            st.markdown("**Deposits**")
+            render_compact_table(['#', 'Date', 'Amount'], _dated_rows('DEPOSIT'), left_cols=(1,),
+                                 auto_width=True, total_last=True, font_px=13)
+        with c2:
+            st.markdown("**Transferred back**")
+            render_compact_table(['#', 'Date', 'Amount'], _dated_rows('TRANSFER_BACK'), left_cols=(1,),
+                                 auto_width=True, total_last=True, font_px=13)
+        with c3:
+            st.markdown("**Charges**")
+            ch = a_ent[a_ent['kind'] == 'CHARGE']
+            ch_rows = [[(r['label'], None), (money(r['amount']), None)] for _, r in ch.iterrows()]
+            ch_rows.append([("Total", None), (money(a_chg), None)])
+            render_compact_table(['Financial year', 'Amount'], ch_rows, left_cols=(0,),
+                                 auto_width=True, total_last=True, font_px=13)
+
+    if st.session_state.get("cash_msg"):
+        st.success(st.session_state.pop("cash_msg"))
+
+    with st.expander("✏️ Add or update entries"):
+        with st.form("cash_flow_form", clear_on_submit=True):
+            st.markdown("**Record a deposit or a transfer back**")
+            f1, f2 = st.columns(2)
+            f_acct = f1.selectbox("Account", ACCOUNTS)
+            f_kind = f2.selectbox("Type", ["Deposit", "Transferred back"])
+            f_date = f1.date_input("Date", datetime.now())
+            f_amt = f2.number_input("Amount (₹)", min_value=0.0, step=100.0)
+            if st.form_submit_button("Save entry", type="primary"):
+                if f_amt <= 0:
+                    st.warning("Enter an amount above 0.")
+                else:
+                    cash_add_entry(f_acct, 'DEPOSIT' if f_kind == "Deposit" else 'TRANSFER_BACK', f_date, f_amt)
+                    st.session_state["cash_msg"] = f"Saved {f_kind.lower()} of {money(f_amt)} for {f_acct}."
+                    st.rerun()
+        with st.form("cash_charge_form", clear_on_submit=True):
+            st.markdown("**Charges for a financial year** (saving the same year again replaces its amount)")
+            g1, g2, g3 = st.columns(3)
+            g_acct = g1.selectbox("Account", ACCOUNTS, key="chg_acct")
+            g_fy = g2.text_input("Financial year", value="2026-27")
+            g_amt = g3.number_input("Charges (₹)", min_value=0.0, step=1.0)
+            if st.form_submit_button("Save charges"):
+                if not g_fy.strip():
+                    st.warning("Enter the financial year, e.g. 2026-27.")
+                else:
+                    cash_set_charge(g_acct, g_fy.strip(), g_amt)
+                    st.session_state["cash_msg"] = f"Saved charges of {money(g_amt)} for {g_acct}, {g_fy.strip()}."
+                    st.rerun()
+        with st.form("cash_holdings_form"):
+            st.markdown("**Exposed and Equity Value** — by default taken from this app's holdings. "
+                        "If your broker accounts hold more than the Trade Book, type the totals here.")
+            k1, k2 = st.columns(2)
+            k_exp = k1.number_input("Exposed / Invested (₹, both accounts)", min_value=0.0, step=100.0,
+                                    value=float(ovr[0]) if ovr else float(exposed))
+            k_eq = k2.number_input("Equity Value on date (₹, both accounts)", min_value=0.0, step=100.0,
+                                   value=float(ovr[1]) if ovr else float(equity_val))
+            kb1, kb2 = st.columns(2)
+            if kb1.form_submit_button("Use these figures"):
+                cash_set_override(k_exp, k_eq)
+                st.session_state["cash_msg"] = "Now using the figures you typed for Exposed and Equity Value."
+                st.rerun()
+            if kb2.form_submit_button("Use the app's holdings"):
+                cash_set_override(None, None)
+                st.session_state["cash_msg"] = "Now using the holdings from this app."
+                st.rerun()
+        with st.form("cash_balance_form"):
+            st.markdown("**Cash balance** (type the figure from your broker)")
+            h1, h2 = st.columns(2)
+            h_acct = h1.selectbox("Account", ACCOUNTS, key="bal_acct")
+            h_amt = h2.number_input("Cash balance (₹)", min_value=0.0, step=1.0)
+            if st.form_submit_button("Save cash balance"):
+                cash_set_balance(h_acct, h_amt)
+                st.session_state["cash_msg"] = f"Cash balance for {h_acct} set to {money(h_amt)}."
+                st.rerun()
+
+    with st.expander("🗑️ Remove an entry"):
+        if ent.empty:
+            st.caption("No entries.")
+        else:
+            names = {int(r['id']): (f"{r['account']} · {'Deposit' if r['kind'] == 'DEPOSIT' else 'Transferred back' if r['kind'] == 'TRANSFER_BACK' else 'Charges ' + str(r['label'])}"
+                                    f"{'' if pd.isna(r['date']) else ' · ' + fmt_date(r['date'])} · {money(r['amount'])}")
+                     for _, r in ent.iterrows()}
+            pick = st.selectbox("Entry", list(names.keys()), format_func=lambda i: names[i], index=None,
+                                placeholder="Pick the entry to remove")
+            sure = st.checkbox("Yes, remove it")
+            if st.button("🗑️ Remove entry", disabled=not (pick is not None and sure)):
+                cash_delete_entry(pick)
+                st.session_state["cash_msg"] = f"Removed: {names[pick]}"
+                st.rerun()
 
 elif page == "CMP Overrides":
     st.subheader("⚙️ Price Overrides")
