@@ -1095,8 +1095,8 @@ def render_pl_booked(title, df, is_loss):
         rows, left_cols=(1, 2), total_last=True, font_px=13
     )
 
-def render_pl_partial(title, df, trades):
-    """Stocks that are still held but have already sold some units at a profit (partially realized).
+def render_pl_partial(title, df, trades, is_loss=False):
+    """Stocks that are still held but have already sold some units (partially realized), at a profit or a loss.
     Figures cover only the units sold (FIFO); Avg_Cost = average buy price of those units."""
     rows_data = []
     for _, r in df.iterrows():
@@ -1107,7 +1107,7 @@ def render_pl_partial(title, df, trades):
         rows_data.append({'Type': r['Type'], 'Stock': r['Stock'], 'Units_Left': int(r['Units']), 'Qty': qty,
                           'Avg': (cost / qty) if qty else 0.0, 'Cost': cost, 'Proceeds': proceeds, 'PL': pl,
                           'Ret': (pl / cost) if cost else float('nan')})
-    rows_data.sort(key=lambda d: d['PL'], reverse=True)
+    rows_data.sort(key=lambda d: d['PL'], reverse=not is_loss)
     st.markdown(f"#### {title} ({len(rows_data)})")
     if not rows_data:
         st.caption("None yet.")
@@ -1116,10 +1116,11 @@ def render_pl_partial(title, df, trades):
     t_cost = sum(d['Cost'] for d in rows_data)
     t_proc = sum(d['Proceeds'] for d in rows_data)
     t_pl = sum(d['PL'] for d in rows_data)
-    tint, ink = "#DFF5E1", "#1B5E20"
+    tint, ink = ("#FDE2E2", "#B71C1C") if is_loss else ("#DFF5E1", "#1B5E20")
+    kind = "loss" if is_loss else "profit"
     if IS_MOBILE:
         for i, d in enumerate(rows_data, start=1):
-            st.button(f"{i}.  {d['Stock']}", key=f"ppb_{d['Type']}_{i}_{d['Stock']}", type="tertiary",
+            st.button(f"{i}.  {d['Stock']}", key=f"ppb_{kind}_{d['Type']}_{i}_{d['Stock']}", type="tertiary",
                       on_click=go_to_stock, args=(stock_label(d['Type'], d['Stock']),))
             render_cards([card_html(badge=d['Type'], items=[
                 ("Realized", money(d['PL']), pl_color(d['PL'])), ("Return", "-" if pd.isna(d['Ret']) else f"{d['Ret']:.1%}", None),
@@ -1131,7 +1132,7 @@ def render_pl_partial(title, df, trades):
         return
     # one chip row per type would mix labels, so link by the type each stock belongs to
     for ptype in sorted({d['Type'] for d in rows_data}):
-        stock_link_pills(ptype, [d['Stock'] for d in rows_data if d['Type'] == ptype], f"pp_open_{ptype}")
+        stock_link_pills(ptype, [d['Stock'] for d in rows_data if d['Type'] == ptype], f"pp_open_{kind}_{ptype}")
     rows = []
     for i, d in enumerate(rows_data, start=1):
         rows.append([(i, None), (d['Type'], None), (d['Stock'], None), (f"{d['Units_Left']:,}", None),
@@ -1248,6 +1249,8 @@ elif page == "Profit/Loss":
                      squared[squared['Realized_PL'] > 0].sort_values('Realized_PL', ascending=False), is_loss=False)
     held_partial = portfolio_df[(portfolio_df['Units'] > 0) & (portfolio_df['Realized_PL'] > 0)]
     render_pl_partial("🟡 Partially Realized Profits (still holding)", held_partial, processed_trades)
+    held_partial_loss = portfolio_df[(portfolio_df['Units'] > 0) & (portfolio_df['Realized_PL'] < 0)]
+    render_pl_partial("🟠 Partially Realized Losses (still holding)", held_partial_loss, processed_trades, is_loss=True)
 
 elif page == "Individual Stock":
     st.subheader("🔍 Individual Stock Analysis")
