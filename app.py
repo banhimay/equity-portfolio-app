@@ -216,13 +216,14 @@ def cash_delete_entry(entry_id):
         cur.execute("DELETE FROM cash_entries WHERE id=%s", (int(entry_id),))
     load_cash.clear()
 
-def cash_set_charge(account, label, amount):
-    """One charges figure per account per financial year: update it if it exists, else add it."""
+def cash_set_charge(account, label, amount, kind='CHARGE'):
+    """One figure per account, charge head and financial year: update it if it exists, else add it.
+    kind 'CHARGE' = Statutory & Broker Charges, 'DP_CHARGE' = DP Charges."""
     db_init()
     with db_connect() as conn, conn.cursor() as cur:
-        cur.execute("UPDATE cash_entries SET amount=%s WHERE account=%s AND kind='CHARGE' AND label=%s", (amount, account, label))
+        cur.execute("UPDATE cash_entries SET amount=%s WHERE account=%s AND kind=%s AND label=%s", (amount, account, kind, label))
         if cur.rowcount == 0:
-            cur.execute("INSERT INTO cash_entries (account, kind, label, amount) VALUES (%s,'CHARGE',%s,%s)", (account, label, amount))
+            cur.execute("INSERT INTO cash_entries (account, kind, label, amount) VALUES (%s,%s,%s,%s)", (account, kind, label, amount))
     load_cash.clear()
 
 def cash_get_override():
@@ -1647,7 +1648,9 @@ elif page == "Cash Flow":
     ovr = cash_get_override()
     if ovr:
         exposed, equity_val = ovr
-    dep, back, chg = _sum(ent, 'DEPOSIT'), _sum(ent, 'TRANSFER_BACK'), _sum(ent, 'CHARGE')
+    dep, back = _sum(ent, 'DEPOSIT'), _sum(ent, 'TRANSFER_BACK')
+    bro_chg, dp_chg = _sum(ent, 'CHARGE'), _sum(ent, 'DP_CHARGE')
+    chg = bro_chg + dp_chg
     cash_total = float(sum(bal.get(a, 0.0) for a in ACCOUNTS))
     net_dep = dep - back
     total_value = exposed + cash_total
@@ -1668,24 +1671,30 @@ elif page == "Cash Flow":
         ("Equity Value on date", money(equity_val), None, None),
     ])
     kpi_grid([
-        ("Gross Profit", money(gross), None, None, pl_color(gross)),
+        ("Statutory & Broker Charges", money(bro_chg), None, None),
+        ("DP Charges", money(dp_chg), None, None),
         ("Charges Total", money(chg), None, None),
+    ])
+    kpi_grid([
+        ("Gross Profit", money(gross), None, None, pl_color(gross)),
         ("Net Profit", money(net_profit), None, None, pl_color(net_profit)),
         ("Return on Net Deployed", "-" if pd.isna(ret) else f"{ret:.2%}", None, None, pl_color(net_profit)),
     ])
     st.caption(("Exposed and Equity Value are the figures you typed in (see ✏️ below)." if ovr else
                 "Exposed and Equity Value come from the holdings in this app (both accounts together).") +
-               " Gross Profit = Equity Value + Cash Balance − Net Deployed. Net Profit = Gross Profit − Charges.")
+               " Gross Profit = Equity Value + Cash Balance − Net Deployed. Net Profit = Gross Profit − Statutory & Broker Charges − DP Charges.")
 
     for acct in ACCOUNTS:
         a_ent = ent[ent['account'] == acct]
-        a_dep, a_back, a_chg = _sum(a_ent, 'DEPOSIT'), _sum(a_ent, 'TRANSFER_BACK'), _sum(a_ent, 'CHARGE')
+        a_dep, a_back = _sum(a_ent, 'DEPOSIT'), _sum(a_ent, 'TRANSFER_BACK')
+        a_bro, a_dp = _sum(a_ent, 'CHARGE'), _sum(a_ent, 'DP_CHARGE')
         st.markdown(f"#### {acct}")
         kpi_grid([
             ("Deposits", money(a_dep), None, None),
             ("Transferred Back", money(a_back), None, None),
             ("Net Deployed", money(a_dep - a_back), None, None),
-            ("Charges", money(a_chg), None, None),
+            ("Statutory & Broker Charges", money(a_bro), None, None),
+            ("DP Charges", money(a_dp), None, None),
             ("Cash Balance", money(bal.get(acct, 0.0)), None, None),
         ])
 
@@ -1696,7 +1705,7 @@ elif page == "Cash Flow":
             rows.append([("", None), ("Total", None), (money(float(sub['amount'].sum())), None)])
             return rows
 
-        c1, c2, c3 = st.columns(3)
+        c1, c2, c3 = st.columns([1, 1, 1.5])
         with c1:
             st.markdown("**Deposits**")
             render_compact_table(['#', 'Date', 'Amount'], _dated_rows('DEPOSIT'), left_cols=(1,),
@@ -1706,11 +1715,16 @@ elif page == "Cash Flow":
             render_compact_table(['#', 'Date', 'Amount'], _dated_rows('TRANSFER_BACK'), left_cols=(1,),
                                  auto_width=True, total_last=True, font_px=13)
         with c3:
-            st.markdown("**Charges**")
-            ch = a_ent[a_ent['kind'] == 'CHARGE']
-            ch_rows = [[(r['label'], None), (money(r['amount']), None)] for _, r in ch.iterrows()]
-            ch_rows.append([("Total", None), (money(a_chg), None)])
-            render_compact_table(['Financial year', 'Amount'], ch_rows, left_cols=(0,),
+            st.markdown("**Charges** (by financial year)")
+            ch = a_ent[a_ent['kind'].isin(['CHARGE', 'DP_CHARGE'])]
+            fys = sorted(ch['label'].dropna().unique().tolist())
+            ch_rows = []
+            for fy in fys:
+                b_amt = float(ch.loc[(ch['label'] == fy) & (ch['kind'] == 'CHARGE'), 'amount'].sum())
+                d_amt = float(ch.loc[(ch['label'] == fy) & (ch['kind'] == 'DP_CHARGE'), 'amount'].sum())
+                ch_rows.append([(fy, None), (money(b_amt), None), (money(d_amt), None), (money(b_amt + d_amt), None)])
+            ch_rows.append([("Total", None), (money(a_bro), None), (money(a_dp), None), (money(a_bro + a_dp), None)])
+            render_compact_table(['Fin. year', 'Statutory & Broker', 'DP Charges', 'Total'], ch_rows, left_cols=(0,),
                                  auto_width=True, total_last=True, font_px=13)
 
     if st.session_state.get("cash_msg"):
@@ -1732,17 +1746,18 @@ elif page == "Cash Flow":
                     st.session_state["cash_msg"] = f"Saved {f_kind.lower()} of {money(f_amt)} for {f_acct}."
                     st.rerun()
         with st.form("cash_charge_form", clear_on_submit=True):
-            st.markdown("**Charges for a financial year** (saving the same year again replaces its amount)")
-            g1, g2, g3 = st.columns(3)
+            st.markdown("**Charges for a financial year** (saving the same head and year again replaces its amount)")
+            g1, g2, g3, g4 = st.columns(4)
             g_acct = g1.selectbox("Account", ACCOUNTS, key="chg_acct")
-            g_fy = g2.text_input("Financial year", value="2026-27")
-            g_amt = g3.number_input("Charges (₹)", min_value=0.0, step=1.0)
+            g_head = g2.selectbox("Charge head", ["Statutory & Broker Charges", "DP Charges"])
+            g_fy = g3.text_input("Financial year", value="2026-27")
+            g_amt = g4.number_input("Charges (₹)", min_value=0.0, step=1.0)
             if st.form_submit_button("Save charges"):
                 if not g_fy.strip():
                     st.warning("Enter the financial year, e.g. 2026-27.")
                 else:
-                    cash_set_charge(g_acct, g_fy.strip(), g_amt)
-                    st.session_state["cash_msg"] = f"Saved charges of {money(g_amt)} for {g_acct}, {g_fy.strip()}."
+                    cash_set_charge(g_acct, g_fy.strip(), g_amt, 'DP_CHARGE' if g_head == "DP Charges" else 'CHARGE')
+                    st.session_state["cash_msg"] = f"Saved {g_head} of {money(g_amt)} for {g_acct}, {g_fy.strip()}."
                     st.rerun()
         with st.form("cash_holdings_form"):
             st.markdown("**Exposed and Equity Value** — by default taken from this app's holdings. "
@@ -1775,7 +1790,7 @@ elif page == "Cash Flow":
         if ent.empty:
             st.caption("No entries.")
         else:
-            names = {int(r['id']): (f"{r['account']} · {'Deposit' if r['kind'] == 'DEPOSIT' else 'Transferred back' if r['kind'] == 'TRANSFER_BACK' else 'Charges ' + str(r['label'])}"
+            names = {int(r['id']): (f"{r['account']} · {'Deposit' if r['kind'] == 'DEPOSIT' else 'Transferred back' if r['kind'] == 'TRANSFER_BACK' else ('DP Charges ' if r['kind'] == 'DP_CHARGE' else 'Statutory & Broker Charges ') + str(r['label'])}"
                                     f"{'' if pd.isna(r['date']) else ' · ' + fmt_date(r['date'])} · {money(r['amount'])}")
                      for _, r in ent.iterrows()}
             pick = st.selectbox("Entry", list(names.keys()), format_func=lambda i: names[i], index=None,
