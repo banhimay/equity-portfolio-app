@@ -160,6 +160,12 @@ def db_init():
             tb, co = _load_data_xlsx()
             _db_write_trades(cur, tb, co)
             cur.execute("INSERT INTO app_meta (key, value) VALUES ('trades_seeded', now()::text)")
+        cur.execute("SELECT 1 FROM app_meta WHERE key='kabra_sale_added'")
+        if cur.fetchone() is None:   # one-time: KABRAEXTRU sale of 23-Oct-2026 that was missing from the app
+            cur.execute("SELECT 1 FROM trades WHERE stock='KABRAEXTRU' AND trade_date='2026-10-23' AND unit<0")
+            if cur.fetchone() is None:
+                cur.execute("INSERT INTO trades (type, stock, trade_date, price, unit) VALUES ('SATELLITE','KABRAEXTRU','2026-10-23',678.10,-37)")
+            cur.execute("INSERT INTO app_meta (key, value) VALUES ('kabra_sale_added', now()::text)")
         cur.execute("""CREATE TABLE IF NOT EXISTS cash_entries (
             id serial PRIMARY KEY, account text NOT NULL, kind text NOT NULL, entry_date date, label text,
             amount numeric(14,2) NOT NULL)""")
