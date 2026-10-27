@@ -54,6 +54,9 @@ st.markdown(
     "<style>"
     ".kpi-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;margin:4px 0 8px 0;}"
     ".kpi-grid.sm{grid-template-columns:repeat(auto-fit,minmax(105px,1fr));}"
+    ".kpi-grid.narrow{grid-template-columns:repeat(auto-fit,minmax(125px,175px));justify-content:center;}"
+    ".kpi-grid.narrow .kpi{text-align:center;}"
+    "@media(max-width:640px){.kpi-grid.narrow{grid-template-columns:repeat(3,1fr);gap:5px;}.kpi-grid.narrow .kpi{padding:6px 4px;}.kpi-grid.narrow .kpi-l{font-size:10px;}.kpi-grid.narrow .kpi-v{font-size:.9rem;}}"
     ".kpi{border:1px solid rgba(128,128,128,.30);border-radius:10px;padding:8px 10px;}"
     ".kpi-l{font-size:12px;opacity:.7;}"
     ".kpi-v{font-size:1.2rem;font-weight:700;line-height:1.3;}"
@@ -751,7 +754,7 @@ def pl_color(v):
 def esc(x):
     return html_lib.escape(str(x))
 
-def kpi_grid(items, small=False):
+def kpi_grid(items, small=False, narrow=False):
     """items: (label, value, sub_text_or_None, sub_color_or_None). Wraps to 2 per row on phones."""
     cells = ""
     for label, value, sub, sub_color, *rest in items:
@@ -759,7 +762,7 @@ def kpi_grid(items, small=False):
         sub_html = f"<div class='kpi-s' style='color:{sub_color or 'inherit'};'>{esc(sub)}</div>" if sub else ""
         cells += (f"<div class='kpi'><div class='kpi-l'>{esc(label)}</div>"
                   f"<div class='kpi-v' style='color:{value_color or 'inherit'};'>{esc(value)}</div>{sub_html}</div>")
-    st.markdown(f"<div class='kpi-grid{' sm' if small else ''}'>{cells}</div>", unsafe_allow_html=True)
+    st.markdown(f"<div class='kpi-grid{' sm' if small else ''}{' narrow' if narrow else ''}'>{cells}</div>", unsafe_allow_html=True)
 
 def card_html(title=None, right=None, right_color=None, items=(), badge=None, total=False, bg=None):
     """One mobile card: optional header (title left, headline value right) + a 2-column grid of
@@ -1710,7 +1713,7 @@ elif page == "Cash Flow":
     chg = bro_chg + dp_chg
     cash_total = float(sum(bal.get(a, 0.0) for a in ACCOUNTS))
     net_dep = dep - back
-    total_value = exposed + cash_total
+    total_value = equity_val + cash_total   # worth now: shares at market value + cash
     gross = equity_val + cash_total - net_dep
     net_profit = gross - chg
     ret = (net_profit / net_dep) if net_dep else float('nan')
@@ -1724,14 +1727,14 @@ elif page == "Cash Flow":
     kpi_grid([
         ("Exposed (Invested)", money(exposed), None, None),
         ("Cash Balance", money(cash_total), None, None),
-        ("Total Value (invested + cash)", money(total_value), None, None),
+        ("Total Value (equity + cash)", money(total_value), None, None),
         ("Equity Value on date", money(equity_val), None, None),
     ])
     kpi_grid([
         ("Statutory & Broker Charges", money(bro_chg), None, None),
         ("DP Charges", money(dp_chg), None, None),
         ("Charges Total", money(chg), None, None),
-    ])
+    ], narrow=True)
     kpi_grid([
         ("Gross Profit", money(gross), None, None, pl_color(gross)),
         ("Net Profit", money(net_profit), None, None, pl_color(net_profit)),
