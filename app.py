@@ -692,7 +692,7 @@ def render_cards(cards):
 
 # --- NAVIGATION ---
 PAGES = ["Dashboard Overview", "Core Holdings", "Satellite Holdings",
-         "Profit/Loss", "Individual Stock", "Trailing Stop Loss", "Trade Book", "Add Trade", "CMP Overrides"]
+         "Profit/Loss", "Individual Stock", "Trailing Stop Loss", "Trade Book & Add Trade", "CMP Overrides"]
 
 def do_logout():
     st.session_state["authenticated"] = False
@@ -702,8 +702,8 @@ def do_refresh():
 
 NAV_LABELS = {
     "Dashboard Overview": "🏠 Overview", "Core Holdings": "🎯 Core", "Satellite Holdings": "🚀 Satellite",
-    "Profit/Loss": "📉 Profit/Loss", "Individual Stock": "🔍 Stock", "Trailing Stop Loss": "🛡️ Trailing SL", "Trade Book": "📒 Trade Book",
-    "Add Trade": "➕ Add Trade", "CMP Overrides": "⚙️ CMP",
+    "Profit/Loss": "📉 Profit/Loss", "Individual Stock": "🔍 Stock", "Trailing Stop Loss": "🛡️ Trailing SL", "Trade Book & Add Trade": "📒 Trades",
+    "CMP Overrides": "⚙️ CMP",
 }
 
 def _nav_changed():
@@ -713,6 +713,11 @@ def _nav_changed():
         st.session_state["nav_page"] = st.session_state.get("_last_page", PAGES[0])
     else:
         st.session_state["_last_page"] = v
+
+# a page name saved by an older version of the menu (e.g. "Trade Book" / "Add Trade") would break the menu
+for _k in ("nav_page", "_last_page"):
+    if _k in st.session_state and st.session_state[_k] not in PAGES:
+        st.session_state[_k] = PAGES[0]
 
 if IS_MOBILE:
     st.session_state.setdefault("nav_page", PAGES[0])
@@ -1052,10 +1057,16 @@ def render_trailing_sl(title, ptype):
     render_compact_table(['SL', 'STOCK', 'Weighted Avg Cost', 'Tranche', 'Trailing SL', 'CMP', 'Difference'], rows,
                          left_cols=(1,), font_px=13)
 
+# ---- one menu entry for both: choose Trade Book or Add Trade inside it ----
+if page == "Trade Book & Add Trade":
+    _sec = st.segmented_control("Section", ["📒 Trade Book", "➕ Add Trade"], default="📒 Trade Book",
+                                key="tb_section", label_visibility="collapsed")
+    page = "Add Trade" if _sec == "➕ Add Trade" else "Trade Book"
+
 if page == "Dashboard Overview":
     st.subheader("📊 Dashboard Overview")
     if portfolio_df.empty:
-        st.info("No trades yet. Add one from the 'Add Trade' page.")
+        st.info("No trades yet. Add one from the 'Trade Book & Add Trade' page.")
     else:
         open_df = portfolio_df[portfolio_df['Units'] > 0]
         core_open = open_df[open_df['Type'] == 'CORE']
@@ -1345,7 +1356,7 @@ elif page == "Trailing Stop Loss":
 elif page == "Trade Book":
     st.subheader("📒 Trade Book")
     if trades_df.empty:
-        st.info("No trades recorded yet. Add one from the 'Add Trade' page.")
+        st.info("No trades recorded yet. Switch to ➕ Add Trade above to record one.")
     else:
         tb_view = trades_df.copy()
         tb_view['_id'] = tb_view.index
@@ -1357,23 +1368,6 @@ elif page == "Trade Book":
         type_sel = f1.selectbox("Type", ["All", "CORE", "SATELLITE"])
         stock_sel = f2.selectbox("Stock", ["All"] + sorted(tb_view['Stock'].astype(str).unique().tolist()))
         action_sel = f3.selectbox("Action", ["All", "BUY", "SELL"])
-
-        if stock_sel != "All":
-            pos = portfolio_df[portfolio_df['Stock'] == str(stock_sel).strip().upper()]
-            if type_sel != "All":
-                pos = pos[pos['Type'] == type_sel]
-            held = pos[pos['Units'] > 0]
-            s_val = held['Total_Value'].sum()
-            s_cost = held['Total_Cost'].sum()
-            s_unreal = held['Unrealized_PL'].sum()
-            s_real = pos['Realized_PL'].sum()
-            s_pct = (s_unreal / s_cost * 100) if s_cost > 0 else 0
-            kpi_grid([
-                ("Current Value", money(s_val), None, None),
-                ("Total Invested", money(s_cost), None, None),
-                ("Unrealized P/L", money(s_unreal), f"{s_pct:+.2f}%", pl_color(s_unreal)),
-                ("Realized P/L", money(s_real), None, None),
-            ])
 
         if type_sel != "All":
             tb_view = tb_view[tb_view['TYPE'] == type_sel]
