@@ -1198,7 +1198,7 @@ def render_trailing_sl(title, ptype):
             ("—" if pd.isna(d['Diff']) else f"{money(d['Diff'], 0)} ({d['Diff_pct']:+.0%})", c),
         ])
     render_compact_table(['SL', 'STOCK', 'Weighted Avg Cost', 'Tranche', 'Trailing SL', 'CMP', 'Difference from CMP'], rows,
-                         left_cols=(1,), font_px=13)
+                         left_cols=(1,), auto_width=True, font_px=13)
 
 # ---- one menu entry for both: choose Trade Book or Add Trade inside it ----
 if page == "Trade Book & Add Trade":
