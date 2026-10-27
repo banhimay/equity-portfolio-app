@@ -1171,7 +1171,7 @@ def trailing_sl_table(ptype):
     return out
 
 def render_trailing_sl(title, ptype):
-    data = trailing_sl_table(ptype)
+    data = sorted(trailing_sl_table(ptype), key=lambda d: (-d['Tranche'], d['Stock']))   # most tranches first
     st.markdown(f"#### {title} ({len(data)})")
     if not data:
         st.caption("No open positions.")
@@ -1182,22 +1182,22 @@ def render_trailing_sl(title, ptype):
             st.button(f"{i}.  {d['Stock']}", key=f"tslb_{ptype}_{i}_{d['Stock']}", type="tertiary",
                       on_click=go_to_stock, args=(stock_label(ptype, d['Stock']),))
             render_cards([card_html(items=[
-                ("Wtd Avg Cost", money(d['WAC']), None), ("Tranche", str(d['Tranche']), None),
-                ("CMP", money(d['CMP']), None),
-                ("Trailing SL", "—" if pd.isna(d['Trailing_SL']) else money(d['Trailing_SL']), None),
-                ("Difference", "—" if pd.isna(d['Diff']) else f"{money(d['Diff'])} ({d['Diff_pct']:+.1%})", c)])])
+                ("Wtd Avg Cost", money(d['WAC'], 0), None), ("Tranche", str(d['Tranche']), None),
+                ("CMP", money(d['CMP'], 0), None),
+                ("Trailing SL", "—" if pd.isna(d['Trailing_SL']) else money(d['Trailing_SL'], 0), None),
+                ("Difference from CMP", "—" if pd.isna(d['Diff']) else f"{money(d['Diff'], 0)} ({d['Diff_pct']:+.0%})", c)])])
         return
     stock_link_pills(ptype, [d['Stock'] for d in data], f"tsl_open_{ptype}")
     rows = []
     for i, d in enumerate(data, start=1):
         c = None if pd.isna(d['Diff']) else (UP if d['Diff'] >= 0 else DOWN)
         rows.append([
-            (i, None), (d['Stock'], None), (money(d['WAC']), None), (d['Tranche'], None),
-            ("—" if pd.isna(d['Trailing_SL']) else money(d['Trailing_SL']), None),
-            (money(d['CMP']), None),
-            ("—" if pd.isna(d['Diff']) else f"{money(d['Diff'])} ({d['Diff_pct']:+.1%})", c),
+            (i, None), (d['Stock'], None), (money(d['WAC'], 0), None), (d['Tranche'], None),
+            ("—" if pd.isna(d['Trailing_SL']) else money(d['Trailing_SL'], 0), None),
+            (money(d['CMP'], 0), None),
+            ("—" if pd.isna(d['Diff']) else f"{money(d['Diff'], 0)} ({d['Diff_pct']:+.0%})", c),
         ])
-    render_compact_table(['SL', 'STOCK', 'Weighted Avg Cost', 'Tranche', 'Trailing SL', 'CMP', 'Difference'], rows,
+    render_compact_table(['SL', 'STOCK', 'Weighted Avg Cost', 'Tranche', 'Trailing SL', 'CMP', 'Difference from CMP'], rows,
                          left_cols=(1,), font_px=13)
 
 # ---- one menu entry for both: choose Trade Book or Add Trade inside it ----
@@ -1498,7 +1498,7 @@ elif page == "Trailing Stop Loss":
         render_trailing_sl("🎯 Core Holdings", "CORE")
         st.caption("Trailing SL = the last stop-loss entered for the stock: your latest Shaktiman value "
                    "(tranche 4+), otherwise the rule-based SL of its last tranche. Tranche = number of open "
-                   "tranches. Difference = CMP − Trailing SL (green = CMP above the stop, red = below).")
+                   "tranches. Difference from CMP = CMP − Trailing SL (green = CMP above the stop, red = below). Stocks are listed with the most tranches first.")
 
 elif page == "Trade Book":
     st.subheader("📒 Trade Book")
