@@ -56,6 +56,9 @@ st.markdown(
     ".kpi-grid.sm{grid-template-columns:repeat(auto-fit,minmax(105px,1fr));}"
     ".kpi-grid.narrow{grid-template-columns:repeat(auto-fit,minmax(125px,175px));justify-content:center;}"
     ".kpi-grid.narrow .kpi{text-align:center;}"
+    "[class*='st-key-hp_']{display:none !important;}"
+    "div[data-testid='stElementContainer']:has(iframe[height='0']){display:none;}"
+    "a.stk-link{color:#2f80ed !important;text-decoration:underline;cursor:pointer;font-weight:600;}"
     "@media(max-width:640px){.kpi-grid.narrow{grid-template-columns:repeat(3,1fr);gap:5px;}.kpi-grid.narrow .kpi{padding:6px 4px;}.kpi-grid.narrow .kpi-l{font-size:10px;}.kpi-grid.narrow .kpi-v{font-size:.9rem;}}"
     ".kpi{border:1px solid rgba(128,128,128,.30);border-radius:10px;padding:8px 10px;}"
     ".kpi-l{font-size:12px;opacity:.7;}"
@@ -683,7 +686,12 @@ def render_compact_table(headers, rows, left_cols=(), auto_width=False, total_la
                 style = f" style='background:{bg}; color:{color or '#000'}; font-weight:700;'"
             else:
                 style = f" style='color:{color}; font-weight:600;'" if color else ""
-            tds += f"<td{cls}{style}>{html_lib.escape(str(text))}</td>"
+            if isinstance(text, tuple) and text and text[0] == "LINK":   # ("LINK", pill_key, stock)
+                inner = (f"<a href='#' class='stk-link' data-pill='{html_lib.escape(str(text[1]), quote=True)}' "
+                         f"data-stock='{html_lib.escape(str(text[2]), quote=True)}'>{html_lib.escape(str(text[2]))}</a>")
+            else:
+                inner = html_lib.escape(str(text))
+            tds += f"<td{cls}{style}>{inner}</td>"
         tr_cls = " class='tot'" if (total_last and ri == len(rows) - 1) else ""
         body += f"<tr{tr_cls}>{tds}</tr>"
     st.markdown(
@@ -890,6 +898,24 @@ def stock_label(ptype, stock, is_open=True):
     """Label used by the Individual Stock selector."""
     return f"{ptype} — {stock}" + ("" if is_open else "  (closed)")
 
+def _link_listener():
+    """One tiny script (per page load) that turns clicks on a table's stock link into a click on the matching hidden chip."""
+    import streamlit.components.v1 as components
+    components.html("""<script>
+const P = window.parent, d = P.document;
+if (P.__stkH) d.removeEventListener('click', P.__stkH, true);
+P.__stkH = function (e) {
+  const a = e.target.closest && e.target.closest('a.stk-link');
+  if (!a) return;
+  e.preventDefault();
+  const box = d.querySelector('.st-key-hp_' + a.dataset.pill);
+  if (!box) return;
+  const b = Array.from(box.querySelectorAll('button')).find(x => x.innerText.trim() === a.dataset.stock);
+  if (b) b.click();
+};
+d.addEventListener('click', P.__stkH, true);
+</script>""", height=0)
+
 def stock_link_pills(ptype, stocks, key, closed=()):
     """Desktop: a row of clickable stock chips; picking one opens its Individual Stock page."""
     if not stocks:
@@ -902,7 +928,10 @@ def stock_link_pills(ptype, stocks, key, closed=()):
         if picked:
             go_to_stock(stock_label(ptype, picked, picked not in closed))
 
-    st.pills("🔍 Open a stock's analysis", list(stocks), selection_mode="single", key=key, on_change=_open)
+    # the chips stay in the page (hidden); the stock names inside the tables click them
+    with st.container(key=f"hp_{key}"):
+        st.pills("🔍 Open a stock's analysis", list(stocks), selection_mode="single", key=key, on_change=_open)
+    _link_listener()
 
 def render_holdings_grid(df, ptype):
     """Core / Satellite holdings. Phone: a tappable stock link + small card per holding.
@@ -938,6 +967,7 @@ def tranche_count(ptype, stock, cmp_):
     return int(len(build_tranche_table(lots, float(cmp_))))
 
 def render_overview_open(title, df, heading=True, sum_value_alloc=False, link_type=None, fit=False, ptype=None):
+    pill_key = f"ov_open_{link_type}" if link_type else (f"open_stock_{ptype}" if ptype else None)
     if heading:
         st.markdown(f"#### {title} ({len(df)})")
     if df.empty:
@@ -960,7 +990,7 @@ def render_overview_open(title, df, heading=True, sum_value_alloc=False, link_ty
                    ("Unrealized", money(r['Unrealized_PL']), None), ("Realized", money(r['Realized_PL']), None),
                    ("Net gain", money(r['Total_Net_Gain']), None), ("Alloc", f"{r['Allocation_%']:.1%}", None)]))
         rows.append([
-            (i, None), (r['Stock'], None), (f"{int(r['Units']):,}", None),
+            (i, None), (("LINK", pill_key, r['Stock']) if pill_key else r['Stock'], None), (f"{int(r['Units']):,}", None),
             (money(r['Avg_Cost']), None), (money(r['Total_Cost']), None),
             (money(r['CMP']), cmp_color), (money(r['Yest_Close']), None),
             (money(r['Day_Change']), pl_color(r['Day_Change'])),
@@ -1060,7 +1090,7 @@ def render_overview_booked(title, df, trades):
     for i, d in enumerate(rows_data, start=1):
         c = pl_color(d['PL'])
         rows.append([
-            (i, None), (d['Stock'], None), (d['Status'], None), (f"{d['Units_Left']:,}", None),
+            (i, None), (("LINK", f"bk_open_{ptype_b}", d['Stock']), None), (d['Status'], None), (f"{d['Units_Left']:,}", None),
             (f"{d['Qty_Sold']:,.0f}", None), (money(d['Cost']), None), (money(d['Proceeds']), None),
             (money(d['PL']), c), ("-" if pd.isna(d['Ret']) else f"{d['Ret']:.1%}", c),
             (fmt_date(d['Last_Sale']), None),
@@ -1154,7 +1184,7 @@ def render_pl_partial(title, df, trades, is_loss=False):
         stock_link_pills(ptype, [d['Stock'] for d in rows_data if d['Type'] == ptype], f"pp_open_{kind}_{ptype}")
     rows = []
     for i, d in enumerate(rows_data, start=1):
-        rows.append([(i, None), (d['Type'], None), (d['Stock'], None), (f"{d['Units_Left']:,}", None),
+        rows.append([(i, None), (d['Type'], None), (("LINK", f"pp_open_{kind}_{d['Type']}", d['Stock']), None), (f"{d['Units_Left']:,}", None),
                      (f"{d['Qty']:,.0f}", None), (money(d['Avg']), None), (money(d['Cost']), None),
                      (money(d['Proceeds']), None), (money(d['PL']), pl_color(d['PL'])),
                      ("-" if pd.isna(d['Ret']) else f"{d['Ret']:.1%}", pl_color(d['PL']))])
@@ -1211,7 +1241,7 @@ def render_trailing_sl(title, ptype):
     for i, d in enumerate(data, start=1):
         c = None if pd.isna(d['Diff']) else (UP if d['Diff'] >= 0 else DOWN)
         rows.append([
-            (i, None), (d['Stock'], None), (money(d['WAC'], 0), None), (d['Tranche'], None),
+            (i, None), (("LINK", f"tsl_open_{ptype}", d['Stock']), None), (money(d['WAC'], 0), None), (d['Tranche'], None),
             ("—" if pd.isna(d['Trailing_SL']) else money(d['Trailing_SL'], 0), None),
             (money(d['CMP'], 0), None),
             ("—" if pd.isna(d['Diff']) else f"{money(d['Diff'], 0)} ({d['Diff_pct']:+.0%})", c),
