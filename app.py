@@ -925,13 +925,19 @@ def render_holdings_grid(df, ptype):
         return
 
     stock_link_pills(ptype, df['Stock'].tolist(), f"open_stock_{ptype}")
-    render_overview_open("", df, heading=False, sum_value_alloc=True, fit=True)
+    render_overview_open("", df, heading=False, sum_value_alloc=True, fit=True, ptype=ptype)
 
 def day_change_total(df):
     s = df['Day_Change']
     return s.sum() if s.notna().any() else float('nan')
 
-def render_overview_open(title, df, heading=True, sum_value_alloc=False, link_type=None, fit=False):
+def tranche_count(ptype, stock, cmp_):
+    lots = get_remaining_lots(processed_trades, ptype, stock)
+    if not lots:
+        return None
+    return int(len(build_tranche_table(lots, float(cmp_))))
+
+def render_overview_open(title, df, heading=True, sum_value_alloc=False, link_type=None, fit=False, ptype=None):
     if heading:
         st.markdown(f"#### {title} ({len(df)})")
     if df.empty:
@@ -961,6 +967,7 @@ def render_overview_open(title, df, heading=True, sum_value_alloc=False, link_ty
             (money(r['Total_Value']), None), (money(r['Unrealized_PL']), None),
             (money(r['Realized_PL']), None), (money(r['Total_Net_Gain']), None),
             (f"{r['Allocation_%']:.1%}", None),
+            ("—" if (tc := tranche_count(ptype or link_type or r.get('Type'), r['Stock'], r['CMP'])) is None else tc, None),
         ])
     tot = day_change_total(df)
     val_sum, alloc_sum, cost_sum = df['Total_Value'].sum(), df['Allocation_%'].sum(), df['Total_Cost'].sum()
@@ -980,12 +987,12 @@ def render_overview_open(title, df, heading=True, sum_value_alloc=False, link_ty
             render_cards(cards + [total_card])
         return
     tail = [(money(val_sum), None), (money(unreal_sum), pl_color(unreal_sum)), ("", None), ("", None),
-            (f"{alloc_sum:.1%}", None)]
+            (f"{alloc_sum:.1%}", None), ("", None)]
     rows.append([("", None), ("Total", None), ("", None), ("", None), (money(cost_sum), None), ("", None), ("", None),
                  (money(tot), pl_color(tot))] + tail)
     render_compact_table(
         ['#', 'Stock', 'Units', 'Avg_Cost', 'Total_Cost', 'CMP', 'Yest_Close', '1_Day_Change',
-         'Total_Value', 'Unrealized_PL', 'Realized_PL', 'Total_Net_Gain', 'Allocation_%'],
+         'Total_Value', 'Unrealized_PL', 'Realized_PL', 'Total_Net_Gain', 'Allocation_%', 'Tranche'],
         rows, left_cols=(1,), total_last=True, font_px=12 if (link_type or fit) else 13, fit=bool(link_type) or fit,
         shrink=bool(link_type)
     )
@@ -1068,7 +1075,7 @@ def render_overview_booked(title, df, trades):
     render_compact_table(
         ['#', 'Stock', 'Status', 'Units_Left', 'Qty_Sold', 'Cost_of_Sold', 'Sale_Proceeds',
          'Realized_PL', 'Return_%', 'Last_Sale'],
-        rows, left_cols=(1, 2), total_last=True, font_px=13
+        rows, left_cols=(1, 2), total_last=True, font_px=12, fit=True, shrink=True
     )
 
 def render_pl_booked(title, df, is_loss):
