@@ -649,7 +649,7 @@ def fmt_num(v, decimals=2):
     s = f"{v:,.{decimals}f}"
     return s.rstrip('0').rstrip('.') if decimals > 0 and '.' in s else s
 
-def render_compact_table(headers, rows, left_cols=(), auto_width=False, total_last=False, font_px=12, fit=False):
+def render_compact_table(headers, rows, left_cols=(), auto_width=False, total_last=False, font_px=12, fit=False, shrink=False):
     """Small-font HTML table that fits in one view. rows = list of lists of
     (text, css_color_or_None). total_last=True styles the last row as a total row.
     Works in light and dark themes."""
@@ -663,12 +663,14 @@ def render_compact_table(headers, rows, left_cols=(), auto_width=False, total_la
            "table.cmp tr.tot td{font-weight:800;border-top:2px solid rgba(128,128,128,0.65);"
            "background:rgba(128,128,128,0.10);}"
            "</style>")
-    width = "width:auto;" if auto_width else "width:100%;"
+    width = "width:auto;" if (auto_width or shrink) else "width:100%;"
     if fit:   # squeeze into the page width: tighter cells, headers may wrap (breaking after "_")
         css = css.replace("</style>",
             "table.cmp.fit th,table.cmp.fit td{padding:3px 4px;}"
             "table.cmp.fit th{white-space:normal;line-height:1.15;}"
             "</style>")
+        if shrink:   # columns only as wide as their content, table does not stretch to the page
+            css = css.replace("</style>", "table.cmp.fit th,table.cmp.fit td{padding:2px 3px;}</style>")
     head = "".join(f"<th>{html_lib.escape(h).replace('_', '_<wbr>') if fit else html_lib.escape(h)}</th>" for h in headers)
     body = ""
     for ri, r in enumerate(rows):
@@ -984,7 +986,8 @@ def render_overview_open(title, df, heading=True, sum_value_alloc=False, link_ty
     render_compact_table(
         ['#', 'Stock', 'Units', 'Avg_Cost', 'Total_Cost', 'CMP', 'Yest_Close', '1_Day_Change',
          'Total_Value', 'Unrealized_PL', 'Realized_PL', 'Total_Net_Gain', 'Allocation_%'],
-        rows, left_cols=(1,), total_last=True, font_px=12 if (link_type or fit) else 13, fit=bool(link_type) or fit
+        rows, left_cols=(1,), total_last=True, font_px=12 if (link_type or fit) else 13, fit=bool(link_type) or fit,
+        shrink=bool(link_type)
     )
 
 def render_day_change_summary(core_df, sat_df):
@@ -1154,7 +1157,7 @@ def render_pl_partial(title, df, trades, is_loss=False):
     render_compact_table(
         ['#', 'Type', 'Stock', 'Units_Left', 'Qty_Sold', 'Avg_Cost', 'Cost_of_Sold', 'Sale_Proceeds',
          'Realized_PL', 'Return_%'],
-        rows, left_cols=(1, 2), total_last=True, font_px=13, fit=True
+        rows, left_cols=(1, 2), total_last=True, font_px=12, fit=True, shrink=True
     )
 
 def trailing_sl_table(ptype):
