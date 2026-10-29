@@ -775,8 +775,10 @@ def kpi_grid(items, small=False, narrow=False):
     cells = ""
     for label, value, sub, sub_color, *rest in items:
         value_color = rest[0] if rest else None
+        bg = rest[1] if len(rest) > 1 else None
+        kpi_style = f" style='background:{bg};border-color:{bg.replace('.20', '.75')};'" if bg else ""
         sub_html = f"<div class='kpi-s' style='color:{sub_color or 'inherit'};'>{esc(sub)}</div>" if sub else ""
-        cells += (f"<div class='kpi'><div class='kpi-l'>{esc(label)}</div>"
+        cells += (f"<div class='kpi'{kpi_style}><div class='kpi-l'>{esc(label)}</div>"
                   f"<div class='kpi-v' style='color:{value_color or 'inherit'};'>{esc(value)}</div>{sub_html}</div>")
     st.markdown(f"<div class='kpi-grid{' sm' if small else ''}{' narrow' if narrow else ''}'>{cells}</div>", unsafe_allow_html=True)
 
@@ -1766,14 +1768,14 @@ elif page == "Cash Flow":
 
     st.markdown("#### Both accounts together")
     kpi_grid([
+        ("Net Deployed", money(net_dep), None, None, None, "rgba(47,128,237,.20)"),
         ("Total Amount Deployed", money(dep), None, None),
         ("Total Transferred Back", money(back), None, None),
-        ("Net Deployed", money(net_dep), None, None),
+        ("Total Value (equity + cash)", money(total_value), None, None, None, "rgba(0,166,126,.20)"),
     ])
     kpi_grid([
         ("Exposed (Invested)", money(exposed), None, None),
         ("Cash Balance", money(cash_total), None, None),
-        ("Total Value (equity + cash)", money(total_value), None, None),
         ("Equity Value on date", money(equity_val), None, None),
     ])
     kpi_grid([
