@@ -423,7 +423,7 @@ def fetch_live_prices(tickers, overrides_df):
     return price_map, prev_map
 
 # --- FIFO CALCULATOR ENGINE ---
-def compute_portfolio(df, overrides_df):
+def compute_portfolio(df, overrides_df, net_deployed=0.0):
     if df.empty:
         return pd.DataFrame(), pd.DataFrame()
 
@@ -499,12 +499,26 @@ def compute_portfolio(df, overrides_df):
 
     portfolio = pd.DataFrame(rows)
     if not portfolio.empty:
-        total_portfolio_val = portfolio['Total_Value'].sum()
-        portfolio['Allocation_%'] = portfolio['Total_Value'] / total_portfolio_val if total_portfolio_val > 0 else 0.0
+        # Allocation_% = what is tied up in this stock (Total_Cost) as a share of the money put in (Net Deployed)
+        if net_deployed > 0:
+            portfolio['Allocation_%'] = portfolio['Total_Cost'] / net_deployed
+        else:   # no cash-flow data available: fall back to share of current portfolio value
+            total_portfolio_val = portfolio['Total_Value'].sum()
+            portfolio['Allocation_%'] = portfolio['Total_Value'] / total_portfolio_val if total_portfolio_val > 0 else 0.0
 
     return portfolio, df
 
-portfolio_df, processed_trades = compute_portfolio(trades_df, overrides_df)
+def get_net_deployed():
+    """Deposits - Transferred Back, both accounts (Cash Flow tab). 0 if the database is not available."""
+    if not DATABASE_URL:
+        return 0.0
+    try:
+        ent, _ = load_cash()
+        return float(ent.loc[ent['kind'] == 'DEPOSIT', 'amount'].sum() - ent.loc[ent['kind'] == 'TRANSFER_BACK', 'amount'].sum())
+    except Exception:
+        return 0.0
+
+portfolio_df, processed_trades = compute_portfolio(trades_df, overrides_df, get_net_deployed())
 
 # --- INDIVIDUAL STOCK TRANCHE + STOP-LOSS ENGINE ---
 def get_remaining_lots(df, ptype, stock):
