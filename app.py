@@ -1719,29 +1719,16 @@ elif page == "Weekly Unrealized P/L":
         else:
             wk['friday'] = pd.to_datetime(wk['friday'])
             all_f = sorted(wk['friday'].unique(), reverse=True)
-            n_show = st.selectbox("Weeks to show", [4, 8, 12], index=2) if not IS_MOBILE else 12
-            shown = all_f[:n_show]
+            shown = all_f[:WEEKLY_KEEP]
             tot_by_f = wk.groupby('friday')['unrealized'].sum()
             def _lbl(f):
                 return pd.Timestamp(f).strftime("%d-%b-%y")
-            latest = shown[0]
-            prev = all_f[1] if len(all_f) > 1 else None
-            lt = float(tot_by_f[latest])
-            chg = (lt - float(tot_by_f[prev])) if prev is not None else float('nan')
-            core_l = float(wk[(wk['friday'] == latest) & (wk['type'] == 'CORE')]['unrealized'].sum())
-            sat_l = float(wk[(wk['friday'] == latest) & (wk['type'] == 'SATELLITE')]['unrealized'].sum())
-            kpi_grid([
-                (f"Unrealized P/L · {_lbl(latest)}", money(lt), None, None, pl_color(lt)),
-                ("Change vs previous Friday", "-" if pd.isna(chg) else money(chg), None, None, None if pd.isna(chg) else pl_color(chg)),
-                ("Core", money(core_l), None, None, pl_color(core_l)),
-                ("Satellite", money(sat_l), None, None, pl_color(sat_l)),
-            ])
             if IS_MOBILE:
                 pick = st.selectbox("Friday", [ _lbl(f) for f in all_f ], index=0)
                 f_sel = next(f for f in all_f if _lbl(f) == pick)
                 day = wk[wk['friday'] == f_sel]
                 cards = []
-                for ptype in ("CORE", "SATELLITE"):
+                for ptype in ("SATELLITE", "CORE"):
                     for _, r in day[day['type'] == ptype].sort_values('stock').iterrows():
                         cards.append(card_html(title=r['stock'], badge=ptype.title(), right=money(r['unrealized']),
                                                right_color=pl_color(r['unrealized']),
@@ -1752,7 +1739,7 @@ elif page == "Weekly Unrealized P/L":
                 render_cards(cards)
             else:
                 hdr = ['#', 'Stock'] + [_lbl(f) for f in shown]
-                for ptype, ttl in (("CORE", "🎯 Core Holdings"), ("SATELLITE", "🚀 Satellite Holdings")):
+                for ptype, ttl in (("SATELLITE", "🚀 Satellite Holdings"), ("CORE", "🎯 Core Holdings")):
                     sub = wk[(wk['type'] == ptype) & (wk['friday'].isin(shown))]
                     if sub.empty:
                         continue
@@ -1785,8 +1772,6 @@ elif page == "Weekly Unrealized P/L":
                     else:
                         tr2.append(("–", None))
                 render_compact_table(hdr, [tr1, tr2], left_cols=(1,), font_px=12, fit=True, shrink=True)
-                if len(all_f) > 1:
-                    st.line_chart(tot_by_f.sort_index().rename("Total Unrealized_PL"), height=220)
         with st.expander("⚙️ Manage snapshots"):
             st.caption("Snapshots are taken automatically for each completed Friday. Use these only to repair or extend history.")
             c1, c2 = st.columns(2)
