@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 import yfinance as yf
-from datetime import datetime
+from datetime import datetime, date, timedelta, timezone
 import os
 import html as html_lib
 import re
@@ -158,6 +158,10 @@ def db_init():
         cur.execute("""CREATE TABLE IF NOT EXISTS cmp_override (
             id serial PRIMARY KEY, stock text NOT NULL, manual_cmp numeric(14,4) NOT NULL, note text)""")
         cur.execute("CREATE TABLE IF NOT EXISTS app_meta (key text PRIMARY KEY, value text)")
+        cur.execute("""CREATE TABLE IF NOT EXISTS weekly_unrealized (
+            friday date NOT NULL, type text NOT NULL, stock text NOT NULL, units numeric(14,4) NOT NULL,
+            cost numeric(14,2) NOT NULL, close_price numeric(14,4) NOT NULL, unrealized numeric(14,2) NOT NULL,
+            saved_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (friday, type, stock))""")
         cur.execute("SELECT 1 FROM app_meta WHERE key='trades_seeded'")
         if cur.fetchone() is None:   # first run: copy the Trade Book from the repo's xlsx once
             tb, co = _load_data_xlsx()
@@ -816,8 +820,112 @@ def render_cards(cards):
     st.markdown("".join(cards), unsafe_allow_html=True)
 
 # --- NAVIGATION ---
+# ---- weekly Unrealized_PL snapshots: one per Friday close, held stocks only (Postgres) ----
+WEEKLY_AFTER_CLOSE = (15, 45)   # IST: a Friday counts as "closed" after 3:45 pm (NSE closes 3:30 pm)
+
+def ist_now():
+    return datetime.now(timezone(timedelta(hours=5, minutes=30)))
+
+def completed_fridays(n):
+    """The last n Fridays whose market close is over, oldest first."""
+    now = ist_now()
+    d = now.date() - timedelta(days=(now.date().weekday() - 4) % 7)
+    if d == now.date() and (now.hour, now.minute) < WEEKLY_AFTER_CLOSE:
+        d -= timedelta(days=7)
+    return [d - timedelta(days=7 * i) for i in range(n)][::-1]
+
+def weekly_hist_closes(stocks, start, end):
+    """{stock: Series of daily closes indexed by date} between start and end (inclusive)."""
+    out = {}
+    for stk in stocks:
+        try:
+            h = yf.Ticker(to_yf_symbol(stk)).history(start=start.isoformat(), end=(end + timedelta(days=1)).isoformat())['Close'].dropna()
+            idx = pd.to_datetime(h.index)
+            if getattr(idx, 'tz', None) is not None:
+                idx = idx.tz_localize(None)
+            h.index = idx.normalize()
+            out[stk] = h
+        except Exception:
+            out[stk] = pd.Series(dtype=float)
+    return out
+
+def weekly_compute(fridays, trades, overrides):
+    """Unrealized_PL on each Friday's close for the stocks held that day (FIFO as of that date).
+    Returns (rows, missing): a Friday with any unpriced holding goes in `missing` and is not returned,
+    so a partial week is never saved."""
+    rows, missing = [], {}
+    if not fridays or trades.empty:
+        return rows, missing
+    t = trades.copy()
+    t['Date of Trxn'] = pd.to_datetime(t['Date of Trxn'])
+    stocks = sorted(t['Stock'].astype(str).str.strip().unique())
+    hist = weekly_hist_closes(stocks, min(fridays) - timedelta(days=10), max(fridays))
+    manual = {}
+    if overrides is not None and not overrides.empty:
+        manual = dict(zip(overrides['Stock'], overrides['Manual CMP']))
+    for f in fridays:
+        sub = t[t['Date of Trxn'] <= pd.Timestamp(f)]
+        week, bad = [], []
+        for (ptype, stk), _g in sub.groupby([sub['TYPE'].str.strip().str.upper(), sub['Stock'].astype(str).str.strip()]):
+            lots = get_remaining_lots(sub, ptype, stk.upper())
+            if not lots:
+                continue
+            units = sum(l['remaining'] for l in lots)
+            cost = sum(l['remaining'] * l['price'] for l in lots)
+            h = hist.get(stk, pd.Series(dtype=float))
+            h = h[h.index <= pd.Timestamp(f)]
+            if len(h) and (pd.Timestamp(f) - h.index[-1]).days <= 6:
+                close = float(h.iloc[-1])        # the Friday close (or the last trading day before it)
+            elif stk in manual and pd.notna(manual[stk]):
+                close = float(manual[stk])       # price fetch failed: use your CMP override
+            else:
+                bad.append(stk)
+                continue
+            week.append((f, ptype, stk, float(units), float(cost), close, float(units * close - cost)))
+        if bad:
+            missing[f] = bad
+        else:
+            rows += week
+    return rows, missing
+
+def weekly_load():
+    db_init()
+    with db_connect() as conn, conn.cursor() as cur:
+        cur.execute("SELECT friday, type, stock, units::float, cost::float, close_price::float, unrealized::float "
+                    "FROM weekly_unrealized ORDER BY friday, type, stock")
+        return pd.DataFrame(cur.fetchall(), columns=['friday', 'type', 'stock', 'units', 'cost', 'close', 'unrealized'])
+
+def weekly_save(rows, replace=False):
+    if not rows:
+        return
+    db_init()
+    with db_connect() as conn, conn.cursor() as cur:
+        if replace:
+            for f in sorted({r[0] for r in rows}):
+                cur.execute("DELETE FROM weekly_unrealized WHERE friday=%s", (f,))
+        cur.executemany("INSERT INTO weekly_unrealized (friday, type, stock, units, cost, close_price, unrealized) "
+                        "VALUES (%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (friday, type, stock) DO NOTHING", rows)
+
+def weekly_catch_up(max_weeks=8):
+    """Save any Friday close not yet stored. First run: the last `max_weeks` Fridays; afterwards: every Friday since the last one saved."""
+    saved = weekly_load()
+    have = sorted({pd.Timestamp(x).date() for x in saved['friday']}) if len(saved) else []
+    latest = completed_fridays(1)[0]
+    if have:
+        todo, d = [], have[-1] + timedelta(days=7)
+        while d <= latest and len(todo) < 52:
+            todo.append(d)
+            d += timedelta(days=7)
+    else:
+        todo = completed_fridays(max_weeks)
+    if not todo:
+        return {}
+    rows, missing = weekly_compute(todo, processed_trades, overrides_df)
+    weekly_save(rows)
+    return missing
+
 PAGES = ["Dashboard Overview", "Core Holdings", "Satellite Holdings",
-         "Profit/Loss", "Individual Stock", "Trailing Stop Loss", "Trade Book & Add Trade", "Cash Flow", "CMP Overrides"]
+         "Profit/Loss", "Weekly Unrealized P/L", "Individual Stock", "Trailing Stop Loss", "Trade Book & Add Trade", "Cash Flow", "CMP Overrides"]
 
 def do_logout():
     st.session_state["authenticated"] = False
@@ -827,7 +935,7 @@ def do_refresh():
 
 NAV_LABELS = {
     "Dashboard Overview": "🏠 Overview", "Core Holdings": "🎯 Core", "Satellite Holdings": "🚀 Satellite",
-    "Profit/Loss": "📉 Profit/Loss", "Individual Stock": "🔍 Stock", "Trailing Stop Loss": "🛡️ Trailing SL", "Trade Book & Add Trade": "📒 Trades", "Cash Flow": "💰 Cash Flow",
+    "Profit/Loss": "📉 Profit/Loss", "Weekly Unrealized P/L": "📅 Weekly", "Individual Stock": "🔍 Stock", "Trailing Stop Loss": "🛡️ Trailing SL", "Trade Book & Add Trade": "📒 Trades", "Cash Flow": "💰 Cash Flow",
     "CMP Overrides": "⚙️ CMP",
 }
 
@@ -1265,6 +1373,17 @@ def render_trailing_sl(title, ptype):
     render_compact_table(['SL', 'STOCK', 'Weighted Avg Cost', 'Tranche', 'Trailing SL', 'CMP', 'Difference from CMP'], rows,
                          left_cols=(1,), auto_width=True, font_px=13)
 
+# ---- weekly Unrealized_PL snapshots: catch up once per session (Friday closes are fetched from price history) ----
+_weekly_missing = {}
+if DATABASE_URL and not portfolio_df.empty:
+    _wk_flag = f"wk_checked_{completed_fridays(1)[0]}"
+    if not st.session_state.get(_wk_flag):
+        try:
+            _weekly_missing = weekly_catch_up()
+            st.session_state[_wk_flag] = True
+        except Exception as _exc:
+            _weekly_missing = {"error": [str(_exc)]}
+
 # ---- one menu entry for both: choose Trade Book or Add Trade inside it ----
 if page == "Trade Book & Add Trade":
     _sec = st.segmented_control("Section", ["📒 Trade Book", "➕ Add Trade"], default="📒 Trade Book",
@@ -1564,6 +1683,114 @@ elif page == "Trailing Stop Loss":
         st.caption("Trailing SL = the last stop-loss entered for the stock: your latest Shaktiman value "
                    "(tranche 4+), otherwise the rule-based SL of its last tranche. Tranche = number of open "
                    "tranches. Difference from CMP = CMP − Trailing SL (green = CMP above the stop, red = below). Stocks are listed with the most tranches first.")
+
+elif page == "Weekly Unrealized P/L":
+    st.subheader("📅 Weekly Unrealized P/L")
+    st.caption("Unrealized_PL of the stocks you held at each Friday's market close (FIFO cost, closing price of that day). "
+               "Saved automatically once per Friday and kept as it was on the day.")
+    if not DATABASE_URL:
+        st.info("Weekly snapshots are stored in the database, which is not connected here.")
+    else:
+        if _weekly_missing:
+            _bad = "; ".join(f"{k}: {', '.join(v)}" for k, v in _weekly_missing.items())
+            st.warning(f"Could not price some stocks, so these weeks were not saved yet (will retry): {_bad}")
+        wk = weekly_load()
+        if wk.empty:
+            st.info("No weekly data saved yet.")
+        else:
+            wk['friday'] = pd.to_datetime(wk['friday'])
+            all_f = sorted(wk['friday'].unique(), reverse=True)
+            n_show = st.selectbox("Weeks to show", [4, 8, 13, 26, 52], index=1) if not IS_MOBILE else 8
+            shown = all_f[:n_show]
+            tot_by_f = wk.groupby('friday')['unrealized'].sum()
+            def _lbl(f):
+                return pd.Timestamp(f).strftime("%d-%b-%y")
+            latest = shown[0]
+            prev = all_f[1] if len(all_f) > 1 else None
+            lt = float(tot_by_f[latest])
+            chg = (lt - float(tot_by_f[prev])) if prev is not None else float('nan')
+            core_l = float(wk[(wk['friday'] == latest) & (wk['type'] == 'CORE')]['unrealized'].sum())
+            sat_l = float(wk[(wk['friday'] == latest) & (wk['type'] == 'SATELLITE')]['unrealized'].sum())
+            kpi_grid([
+                (f"Unrealized P/L · {_lbl(latest)}", money(lt), None, None, pl_color(lt)),
+                ("Change vs previous Friday", "-" if pd.isna(chg) else money(chg), None, None, None if pd.isna(chg) else pl_color(chg)),
+                ("Core", money(core_l), None, None, pl_color(core_l)),
+                ("Satellite", money(sat_l), None, None, pl_color(sat_l)),
+            ])
+            if IS_MOBILE:
+                pick = st.selectbox("Friday", [ _lbl(f) for f in all_f ], index=0)
+                f_sel = next(f for f in all_f if _lbl(f) == pick)
+                day = wk[wk['friday'] == f_sel]
+                cards = []
+                for ptype in ("CORE", "SATELLITE"):
+                    for _, r in day[day['type'] == ptype].sort_values('stock').iterrows():
+                        cards.append(card_html(title=r['stock'], badge=ptype.title(), right=money(r['unrealized']),
+                                               right_color=pl_color(r['unrealized']),
+                                               items=[("Units", f"{r['units']:,.0f}", None), ("Cost", money(r['cost']), None),
+                                                      ("Close", money(r['close']), None)]))
+                cards.append(card_html(title="Total", right=money(float(tot_by_f[f_sel])),
+                                       right_color=pl_color(float(tot_by_f[f_sel])), total=True, items=[]))
+                render_cards(cards)
+            else:
+                hdr = ['#', 'Stock'] + [_lbl(f) for f in shown]
+                for ptype, ttl in (("CORE", "🎯 Core Holdings"), ("SATELLITE", "🚀 Satellite Holdings")):
+                    sub = wk[(wk['type'] == ptype) & (wk['friday'].isin(shown))]
+                    if sub.empty:
+                        continue
+                    st.markdown(f"#### {ttl}")
+                    piv = sub.pivot_table(index='stock', columns='friday', values='unrealized', aggfunc='sum')
+                    order = sorted(piv.index)
+                    trs = []
+                    for i, stk in enumerate(order, start=1):
+                        cells = [(i, None), (stk, None)]
+                        for f in shown:
+                            v = piv.loc[stk].get(f, float('nan'))
+                            cells.append(("–", None) if pd.isna(v) else (money(v, 0), pl_color(v)))
+                        trs.append(cells)
+                    tots = [("", None), ("Total", None)]
+                    for f in shown:
+                        tv = float(sub[sub['friday'] == f]['unrealized'].sum()) if (sub['friday'] == f).any() else float('nan')
+                        tots.append(("–", None) if pd.isna(tv) else (money(tv, 0), pl_color(tv)))
+                    trs.append(tots)
+                    render_compact_table(hdr, trs, left_cols=(1,), total_last=True, font_px=12, fit=True, shrink=True)
+                st.markdown("#### 📊 All holdings")
+                tr1 = [("", None), ("Unrealized P/L", None)]
+                tr2 = [("", None), ("Change vs previous Friday", None)]
+                for f in shown:
+                    tv = float(tot_by_f[f])
+                    tr1.append((money(tv, 0), pl_color(tv)))
+                    fi = all_f.index(f)
+                    if fi + 1 < len(all_f):
+                        dv = tv - float(tot_by_f[all_f[fi + 1]])
+                        tr2.append((money(dv, 0), pl_color(dv)))
+                    else:
+                        tr2.append(("–", None))
+                render_compact_table(hdr, [tr1, tr2], left_cols=(1,), font_px=12, fit=True, shrink=True)
+                if len(all_f) > 1:
+                    st.line_chart(tot_by_f.sort_index().rename("Total Unrealized_PL"), height=220)
+        with st.expander("⚙️ Manage snapshots"):
+            st.caption("Snapshots are taken automatically for each completed Friday. Use these only to repair or extend history.")
+            c1, c2 = st.columns(2)
+            if c1.button("Recompute latest Friday (replace)"):
+                _f = completed_fridays(1)
+                _rows, _miss = weekly_compute(_f, processed_trades, overrides_df)
+                weekly_save(_rows, replace=True)
+                st.success(f"Saved {len(_rows)} stocks for {_f[0]:%d-%b-%Y}.") if _rows else st.warning(f"Not saved; unpriced: {_miss}")
+            _start = c2.date_input("Backfill missing Fridays from", value=date.today() - timedelta(days=90))
+            if c2.button("Backfill"):
+                _lat = completed_fridays(1)[0]
+                _d = _start + timedelta(days=(4 - _start.weekday()) % 7)
+                _have = {pd.Timestamp(x).date() for x in weekly_load()['friday']}
+                _todo = []
+                while _d <= _lat and len(_todo) < 104:
+                    if _d not in _have:
+                        _todo.append(_d)
+                    _d += timedelta(days=7)
+                _rows, _miss = weekly_compute(_todo, processed_trades, overrides_df)
+                weekly_save(_rows)
+                st.success(f"Added {len({r[0] for r in _rows})} week(s).") if _rows else st.info("Nothing to add.")
+                if _miss:
+                    st.warning(f"Not saved (unpriced stocks): { {k.isoformat(): v for k, v in _miss.items()} }")
 
 elif page == "Trade Book":
     st.subheader("📒 Trade Book")
