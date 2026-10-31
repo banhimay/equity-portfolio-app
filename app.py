@@ -366,6 +366,29 @@ def rekey_manual_sl(old, new):
         cur_sl.loc[hit, ['TYPE', 'Stock', 'Buy_Date', 'Buy_Price']] = [new[0], new[1], new[2], new[3]]
         save_data(trades_df, overrides_df, cur_sl)
 
+def move_stock_type(tb_df, co_df, stock, src, dst):
+    """Re-mark a stock from src to dst (CORE <-> SATELLITE): no transaction is added, the stock's trades
+    just carry the new Type. Its manual stop-losses, SL history and weekly snapshots follow. Returns the number of trades changed."""
+    mask = (tb_df['TYPE'].astype(str).str.strip().str.upper() == src) & (tb_df['Stock'].astype(str).str.strip() == stock)
+    n = int(mask.sum())
+    if n == 0:
+        return 0
+    upd = tb_df.copy()
+    upd.loc[mask, 'TYPE'] = dst
+    if DATABASE_URL:
+        save_data(upd, co_df)
+        with db_connect() as conn, conn.cursor() as cur:
+            cur.execute("UPDATE manual_sl SET type=%s, updated_at=now() WHERE type=%s AND stock=%s", (dst, src, stock))
+            cur.execute("UPDATE manual_sl_history SET type=%s WHERE type=%s AND stock=%s", (dst, src, stock))
+            cur.execute("UPDATE weekly_unrealized SET type=%s WHERE type=%s AND stock=%s", (dst, src, stock))
+        load_manual_sl.clear()
+    else:
+        sl = load_manual_sl().copy()
+        if not sl.empty:
+            sl.loc[(sl['TYPE'].astype(str).str.upper() == src) & (sl['Stock'] == stock), 'TYPE'] = dst
+        save_data(upd, co_df, sl)
+    return n
+
 trades_df, overrides_df = load_data()
 manual_sl_df = load_manual_sl()
 
@@ -1889,6 +1912,33 @@ elif page == "Trade Book":
     if trades_df.empty:
         st.info("No trades recorded yet. Switch to ➕ Add Trade above to record one.")
     else:
+        if st.session_state.get("mv_msg"):
+            st.success(st.session_state.pop("mv_msg"))
+        with st.expander("🔁 Move a stock between Satellite and Core"):
+            st.caption("Only the marking changes. No buy or sell is recorded: the stock's trades, stop-losses and weekly "
+                       "figures simply move to the other side. Its past realized P/L moves with it.")
+            mv_dir = st.radio("Move", ["SATELLITE → CORE", "CORE → SATELLITE"], horizontal=True, key="mv_dir")
+            _src, _dst = ("SATELLITE", "CORE") if mv_dir.startswith("SATELLITE") else ("CORE", "SATELLITE")
+            _held = portfolio_df[(portfolio_df['Type'] == _src) & (portfolio_df['Units'] > 0)] if not portfolio_df.empty else portfolio_df
+            _opts = sorted(_held['Stock'].astype(str).tolist()) if len(_held) else []
+            if not _opts:
+                st.info(f"No open {_src.title()} holdings to move.")
+            else:
+                mv_stock = st.selectbox("Stock", _opts, key="mv_stock")
+                _r = _held[_held['Stock'].astype(str) == mv_stock].iloc[0]
+                _clash = (not portfolio_df.empty) and bool(((portfolio_df['Type'] == _dst) & (portfolio_df['Stock'].astype(str) == mv_stock) & (portfolio_df['Units'] > 0)).any())
+                st.markdown(f"**{esc(mv_stock)}** · {int(_r['Units']):,} units · invested ₹{float(_r['Total_Cost']):,.2f} → will be counted as **{_dst.title()}**.")
+                if _clash:
+                    st.warning(f"You already hold {mv_stock} in {_dst.title()}; the two positions will be combined.")
+                if st.button(f"🔁 Move {mv_stock} to {_dst.title()}", type="primary", key="mv_go"):
+                    try:
+                        _n = move_stock_type(trades_df, overrides_df, mv_stock, _src, _dst)
+                        st.session_state["mv_msg"] = f"Moved {mv_stock} to {_dst.title()} ({_n} trades re-marked)."
+                        st.session_state["tb_ver"] = st.session_state.get("tb_ver", 0) + 1
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"Could not move the stock: {exc}")
+
         tb_view = trades_df.copy()
         tb_view['_id'] = tb_view.index
         tb_view['Date of Trxn'] = pd.to_datetime(tb_view['Date of Trxn'])
