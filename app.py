@@ -976,16 +976,13 @@ def audit_cash_total():
 def render_audit(title, ptype, other_type):
     own, oth = audit_rows(ptype), audit_rows(other_type)
     cash = audit_cash_total()
-    inv_own, cur_own = sum(r['Inv'] for r in own), sum(r['Cur'] for r in own)
-    inv_oth, cur_oth = sum(r['Inv'] for r in oth), sum(r['Cur'] for r in oth)
-    inv_all, cur_all = inv_own + inv_oth + cash, cur_own + cur_oth + cash
+    inv_all = sum(r['Inv'] for r in own) + sum(r['Inv'] for r in oth) + cash
+    cur_all = sum(r['Cur'] for r in own) + sum(r['Cur'] for r in oth) + cash
     pct = lambda a, b: "-" if not b else f"{a / b:.1%}"
     st.markdown(f"#### {title} ({len(own)})")
     if not own:
         st.caption("No open positions.")
         return
-    hp_vals = [r['HP'] for r in own if r['HP'] is not None]
-    hp_avg = (sum(hp_vals) / len(hp_vals)) if hp_vals else None
     if IS_MOBILE:
         cards = []
         for i, r in enumerate(own, start=1):
@@ -1009,21 +1006,27 @@ def render_audit(title, ptype, other_type):
             ['Sr. No.', 'STOCKS', 'Start Date', 'QTY', 'Avg Buy Price', 'CMP', 'Invested Value', 'Current Value',
              'HP (month)', 'IC (%)', 'CC (%)', 'ROI (%)'],
             rows, left_cols=(1,), font_px=12, fit=True, shrink=True)
-    # portfolio split, in the same order as the sheet: this tab's type, the other type, cash, total
-    nm = lambda t: t.title()
+
+def render_audit_split():
+    """One Portfolio split table for the whole page: Core, Satellite, Cash, Total."""
+    core, sat = audit_rows("CORE"), audit_rows("SATELLITE")
+    cash = audit_cash_total()
+    inv_c, cur_c = sum(r['Inv'] for r in core), sum(r['Cur'] for r in core)
+    inv_s, cur_s = sum(r['Inv'] for r in sat), sum(r['Cur'] for r in sat)
+    inv_all, cur_all = inv_c + inv_s + cash, cur_c + cur_s + cash
+    pct = lambda a, b: "-" if not b else f"{a / b:.1%}"
+    roi = lambda a, b: ("-", None) if not a else (f"{(b / a - 1):.1%}", pl_color(b / a - 1))
     summ = []
-    for label, a, b in ((f"{nm(ptype)}", inv_own, cur_own), (f"{nm(other_type)}", inv_oth, cur_oth), ("Cash", cash, cash)):
-        summ.append([(label, None), (money(a), None), (money(b), None), (pct(a, inv_all), None), (pct(b, cur_all), None),
-                     (f"{(b / a - 1):.1%}" if a else "-", pl_color(b / a - 1) if a else None), ("", None)])
-    summ.append([("Total", None), (money(inv_all), None), (money(cur_all), None), (pct(inv_all, inv_all), None), (pct(cur_all, cur_all), None),
-                 (f"{(cur_all / inv_all - 1):.1%}" if inv_all else "-", pl_color(cur_all / inv_all - 1) if inv_all else None),
-                 ("-" if hp_avg is None else f"{hp_avg:.1f}", None)])
+    for label, a, b in (("Core", inv_c, cur_c), ("Satellite", inv_s, cur_s), ("Cash", cash, cash), ("Total", inv_all, cur_all)):
+        summ.append([(label, None), (money(a), None), (money(b), None), (pct(a, inv_all), None), (pct(b, cur_all), None), roi(a, b)])
+    st.markdown("#### Portfolio split")
     if IS_MOBILE:
-        render_cards([card_html(title=r[0][0], right=r[2][0], items=[("Invested", r[1][0], None), ("IC", r[3][0], None),
-                                                                      ("CC", r[4][0], None), ("ROI", r[5][0], r[5][1])],
+        render_cards([card_html(title=r[0][0], right=r[5][0], right_color=r[5][1],
+                                items=[("Invested", r[1][0], None), ("Current", r[2][0], None),
+                                       ("IC", r[3][0], None), ("CC", r[4][0], None)],
                                 total=(r[0][0] == "Total")) for r in summ])
     else:
-        render_compact_table(['Portfolio split', 'Invested Value', 'Current Value', 'IC (%)', 'CC (%)', 'ROI (%)', 'Avg HP (month)'],
+        render_compact_table(['Portfolio split', 'Invested Value', 'Current Value', 'IC (%)', 'CC (%)', 'ROI (%)'],
                              summ, left_cols=(0,), total_last=True, font_px=12, fit=True, shrink=True)
 
 PAGES = ["Dashboard Overview", "Core Holdings", "Satellite Holdings",
@@ -1876,6 +1879,7 @@ elif page == "Core & Satellite Audit":
     else:
         render_audit("🎯 Core Audit", "CORE", "SATELLITE")
         render_audit("🚀 Satellite Audit", "SATELLITE", "CORE")
+        render_audit_split()
         st.caption("Start Date = first buy date of the lots still held (FIFO). HP = whole months held. "
                    "IC = Invested Value ÷ total invested (Core + Satellite + Cash). CC = Current Value ÷ total current value. "
                    "ROI = Current ÷ Invested − 1. Cash = cash balance from the Cash Flow tab.")
