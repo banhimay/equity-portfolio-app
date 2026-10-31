@@ -941,8 +941,93 @@ def weekly_catch_up():
     weekly_prune(window[0], held)
     return missing
 
+# ---- Core & Satellite Audit (same columns as the Core Audit / Satellite Audit tabs of the sheet) ----
+def months_between(start, today):
+    """Whole months from start to today (Excel DATEDIF(...,"M"))."""
+    m = (today.year - start.year) * 12 + (today.month - start.month)
+    return m - (1 if today.day < start.day else 0)
+
+def audit_rows(ptype):
+    """One row per open position of this type: start date = first buy date of the lots still held (FIFO)."""
+    out = []
+    today = ist_now().date()
+    if portfolio_df.empty:
+        return out
+    sub = portfolio_df[(portfolio_df['Type'] == ptype) & (portfolio_df['Units'] > 0)].sort_values('Stock')
+    for _, r in sub.iterrows():
+        lots = get_remaining_lots(processed_trades, ptype, str(r['Stock']).strip().upper())
+        start = min(l['date'] for l in lots).date() if lots else None
+        inv, cur = float(r['Total_Cost']), float(r['Total_Value'])
+        out.append({'Stock': r['Stock'], 'Start': start, 'Qty': int(r['Units']), 'Avg': float(r['Avg_Cost']),
+                    'CMP': float(r['CMP']), 'Inv': inv, 'Cur': cur,
+                    'HP': months_between(start, today) if start else None,
+                    'ROI': (cur / inv - 1) if inv else 0.0})
+    return out
+
+def audit_cash_total():
+    if not DATABASE_URL:
+        return 0.0
+    try:
+        _, bal = load_cash()
+        return float(sum(bal.get(a, 0.0) for a in ACCOUNTS))
+    except Exception:
+        return 0.0
+
+def render_audit(title, ptype, other_type):
+    own, oth = audit_rows(ptype), audit_rows(other_type)
+    cash = audit_cash_total()
+    inv_own, cur_own = sum(r['Inv'] for r in own), sum(r['Cur'] for r in own)
+    inv_oth, cur_oth = sum(r['Inv'] for r in oth), sum(r['Cur'] for r in oth)
+    inv_all, cur_all = inv_own + inv_oth + cash, cur_own + cur_oth + cash
+    pct = lambda a, b: "-" if not b else f"{a / b:.1%}"
+    st.markdown(f"#### {title} ({len(own)})")
+    if not own:
+        st.caption("No open positions.")
+        return
+    hp_vals = [r['HP'] for r in own if r['HP'] is not None]
+    hp_avg = (sum(hp_vals) / len(hp_vals)) if hp_vals else None
+    if IS_MOBILE:
+        cards = []
+        for i, r in enumerate(own, start=1):
+            cards.append(card_html(
+                title=f"{i}. {r['Stock']}", right=f"{r['ROI']:+.1%}", right_color=pl_color(r['ROI']),
+                items=[("Start", fmt_date(pd.Timestamp(r['Start'])) if r['Start'] else "-", None), ("HP (month)", "-" if r['HP'] is None else str(r['HP']), None),
+                       ("Qty", f"{r['Qty']:,}", None), ("Avg buy", money(r['Avg']), None), ("CMP", money(r['CMP']), None),
+                       ("Invested", money(r['Inv']), None), ("Current", money(r['Cur']), None),
+                       ("IC", pct(r['Inv'], inv_all), None), ("CC", pct(r['Cur'], cur_all), None)]))
+        render_cards(cards)
+    else:
+        rows = []
+        for i, r in enumerate(own, start=1):
+            rows.append([(i, None), (r['Stock'], None), (fmt_date(pd.Timestamp(r['Start'])) if r['Start'] else "-", None),
+                         (f"{r['Qty']:,}", None), (money(r['Avg']), None), (money(r['CMP']), None),
+                         (money(r['Inv']), None), (money(r['Cur']), None),
+                         ("-" if r['HP'] is None else r['HP'], None),
+                         (pct(r['Inv'], inv_all), None), (pct(r['Cur'], cur_all), None),
+                         (f"{r['ROI']:.1%}", pl_color(r['ROI']))])
+        render_compact_table(
+            ['Sr. No.', 'STOCKS', 'Start Date', 'QTY', 'Avg Buy Price', 'CMP', 'Invested Value', 'Current Value',
+             'HP (month)', 'IC (%)', 'CC (%)', 'ROI (%)'],
+            rows, left_cols=(1,), font_px=12, fit=True, shrink=True)
+    # portfolio split, in the same order as the sheet: this tab's type, the other type, cash, total
+    nm = lambda t: t.title()
+    summ = []
+    for label, a, b in ((f"{nm(ptype)}", inv_own, cur_own), (f"{nm(other_type)}", inv_oth, cur_oth), ("Cash", cash, cash)):
+        summ.append([(label, None), (money(a), None), (money(b), None), (pct(a, inv_all), None), (pct(b, cur_all), None),
+                     (f"{(b / a - 1):.1%}" if a else "-", pl_color(b / a - 1) if a else None), ("", None)])
+    summ.append([("Total", None), (money(inv_all), None), (money(cur_all), None), (pct(inv_all, inv_all), None), (pct(cur_all, cur_all), None),
+                 (f"{(cur_all / inv_all - 1):.1%}" if inv_all else "-", pl_color(cur_all / inv_all - 1) if inv_all else None),
+                 ("-" if hp_avg is None else f"{hp_avg:.1f}", None)])
+    if IS_MOBILE:
+        render_cards([card_html(title=r[0][0], right=r[2][0], items=[("Invested", r[1][0], None), ("IC", r[3][0], None),
+                                                                      ("CC", r[4][0], None), ("ROI", r[5][0], r[5][1])],
+                                total=(r[0][0] == "Total")) for r in summ])
+    else:
+        render_compact_table(['Portfolio split', 'Invested Value', 'Current Value', 'IC (%)', 'CC (%)', 'ROI (%)', 'Avg HP (month)'],
+                             summ, left_cols=(0,), total_last=True, font_px=12, fit=True, shrink=True)
+
 PAGES = ["Dashboard Overview", "Core Holdings", "Satellite Holdings",
-         "Profit/Loss", "Weekly Unrealized P/L", "Individual Stock", "Trailing Stop Loss", "Trade Book & Add Trade", "Cash Flow", "CMP Overrides"]
+         "Profit/Loss", "Weekly Unrealized P/L", "Core & Satellite Audit", "Individual Stock", "Trailing Stop Loss", "Trade Book & Add Trade", "Cash Flow", "CMP Overrides"]
 
 def do_logout():
     st.session_state["authenticated"] = False
@@ -952,7 +1037,7 @@ def do_refresh():
 
 NAV_LABELS = {
     "Dashboard Overview": "🏠 Overview", "Core Holdings": "🎯 Core", "Satellite Holdings": "🚀 Satellite",
-    "Profit/Loss": "📉 Profit/Loss", "Weekly Unrealized P/L": "📅 Weekly", "Individual Stock": "🔍 Stock", "Trailing Stop Loss": "🛡️ Trailing SL", "Trade Book & Add Trade": "📒 Trades", "Cash Flow": "💰 Cash Flow",
+    "Profit/Loss": "📉 Profit/Loss", "Weekly Unrealized P/L": "📅 Weekly", "Core & Satellite Audit": "🧾 Audit", "Individual Stock": "🔍 Stock", "Trailing Stop Loss": "🛡️ Trailing SL", "Trade Book & Add Trade": "📒 Trades", "Cash Flow": "💰 Cash Flow",
     "CMP Overrides": "⚙️ CMP",
 }
 
@@ -1783,6 +1868,17 @@ elif page == "Weekly Unrealized P/L":
             if c2.button("Fill any missing Fridays (last 12 weeks)"):
                 _miss = weekly_catch_up()
                 st.success("Up to date.") if not _miss else st.warning(f"Not saved (unpriced stocks): { {k.isoformat(): v for k, v in _miss.items()} }")
+
+elif page == "Core & Satellite Audit":
+    st.subheader("🧾 Core & Satellite Audit")
+    if portfolio_df.empty:
+        st.info("No positions yet.")
+    else:
+        render_audit("🎯 Core Audit", "CORE", "SATELLITE")
+        render_audit("🚀 Satellite Audit", "SATELLITE", "CORE")
+        st.caption("Start Date = first buy date of the lots still held (FIFO). HP = whole months held. "
+                   "IC = Invested Value ÷ total invested (Core + Satellite + Cash). CC = Current Value ÷ total current value. "
+                   "ROI = Current ÷ Invested − 1. Cash = cash balance from the Cash Flow tab.")
 
 elif page == "Trade Book":
     st.subheader("📒 Trade Book")
