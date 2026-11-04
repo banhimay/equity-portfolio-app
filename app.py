@@ -1241,14 +1241,18 @@ def render_overview_open(title, df, heading=True, sum_value_alloc=False, link_ty
                    ("Invested", money(r['Total_Cost']), None), ("Value", money(r['Total_Value']), None),
                    ("Unrealized", money(r['Unrealized_PL']), None), ("Realized", money(r['Realized_PL']), None),
                    ("Net gain", money(r['Total_Net_Gain']), None), ("Alloc", f"{r['Allocation_%']:.1%}", None)]))
+        # Return_% = Unrealized_PL / Total_Cost; it shades Unrealized_PL..Total_Net_Gain:
+        # negative = light red, 0-25% = light blue, above 25% = green
+        ret = (r['Unrealized_PL'] / r['Total_Cost']) if r['Total_Cost'] else 0.0
+        shade = "#f6c6c6" if ret < 0 else ("#c9def5" if ret <= 0.25 else "#b5e3b0")
         rows.append([
             (i, None), (("LINK", pill_key, r['Stock']) if pill_key else r['Stock'], None), (f"{int(r['Units']):,}", None),
             (money(r['Avg_Cost']), None), (money(r['Total_Cost']), None),
             (money(r['CMP']), cmp_color), (money(r['Yest_Close']), None),
             (money(r['Day_Change']), pl_color(r['Day_Change'])),
-            (money(r['Total_Value']), None), (money(r['Unrealized_PL']), None),
-            (money(r['Realized_PL']), None), (money(r['Total_Net_Gain']), None),
-            (f"{r['Allocation_%']:.1%}", None),
+            (money(r['Total_Value']), None), (money(r['Unrealized_PL']), "#111", shade),
+            (money(r['Realized_PL']), "#111", shade), (money(r['Total_Net_Gain']), "#111", shade),
+            (f"{r['Allocation_%']:.1%}", None), (f"{ret:.1%}", None),
             ("—" if (tc := tranche_count(ptype or link_type or r.get('Type'), r['Stock'], r['CMP'])) is None else tc, None),
         ])
     tot = day_change_total(df)
@@ -1269,12 +1273,12 @@ def render_overview_open(title, df, heading=True, sum_value_alloc=False, link_ty
             render_cards(cards + [total_card])
         return
     tail = [(money(val_sum), None), (money(unreal_sum), pl_color(unreal_sum)), ("", None), ("", None),
-            (f"{alloc_sum:.1%}", None), ("", None)]
+            (f"{alloc_sum:.1%}", None), (f"{(unreal_sum / cost_sum):.1%}" if cost_sum else "-", None), ("", None)]
     rows.append([("", None), ("Total", None), ("", None), ("", None), (money(cost_sum), None), ("", None), ("", None),
                  (money(tot), pl_color(tot))] + tail)
     render_compact_table(
         ['#', 'Stock', 'Units', 'Avg_Cost', 'Total_Cost', 'CMP', 'Yest_Close', '1_Day_Change',
-         'Total_Value', 'Unrealized_PL', 'Realized_PL', 'Total_Net_Gain', 'Allocation_%', 'Tranche'],
+         'Total_Value', 'Unrealized_PL', 'Realized_PL', 'Total_Net_Gain', 'Allocation_%', 'Return_%', 'Tranche'],
         rows, left_cols=(1,), total_last=True, font_px=12 if (link_type or fit) else 13, fit=bool(link_type) or fit,
         shrink=bool(link_type)
     )
