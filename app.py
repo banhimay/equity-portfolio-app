@@ -1919,4 +1919,595 @@ elif page == "Individual Stock":
                         except Exception as exc:
                             st.error(f"Could not save the stop-loss: {exc}")
                         else:
-   
+                            st.rerun()
+                if DATABASE_URL:
+                    st.caption("Saved in the database — your trailing stop-loss values survive every deploy.")
+                else:
+                    st.caption("⚠️ No database connected: values are kept in the app file and reset on deploy.")
+                hist = load_sl_history(sel_type, sel_stock)
+                if not hist.empty:
+                    with st.expander(f"🕘 Stop-loss history ({len(hist)} changes)"):
+                        h_rows = []
+                        for _, hr in hist.iterrows():
+                            ts = pd.Timestamp(hr['changed_at']).tz_convert('Asia/Kolkata')
+                            h_rows.append([
+                                (f"{ts.day}-{ts.strftime('%b-%Y %H:%M')}", None),
+                                (f"{hr['buy_date']} @ ₹{hr['buy_price']:,.2f}", None),
+                                ("cleared" if hr['sl_price'] == 0 else money(hr['sl_price']), None),
+                            ])
+                        render_compact_table(['When (IST)', 'Tranche (bought)', 'Stop-loss ₹'], h_rows,
+                                             left_cols=(0, 1), auto_width=True)
+
+            st.markdown("#### Profit Target Ladder")
+            pcts = [10, 15, 20, 25]
+            render_compact_table(
+                ['Profit target'] + [f"+{p}%" for p in pcts],
+                [[("Target price ₹", None)] + [(fmt_num(weighted_avg * (1 + p / 100)), None) for p in pcts]],
+                left_cols=(0,), auto_width=True
+            )
+
+            st.markdown("#### Risk : Reward")
+            reward_15pct = total_investment * 0.15
+            if sl_pending:
+                st.caption("Enter the Shaktiman stop-loss above to see Risk : Reward.")
+            elif current_risk > 0:
+                ratio = reward_15pct / current_risk
+                st.markdown(
+                    f"<p style='font-size:20px; font-weight:800; color:#8B0000;'>"
+                    f"1 : {ratio:.1f}  <span style='font-size:14px; font-weight:400; color:#555;'>"
+                    f"(risk ₹{current_risk:,.0f} vs. reward at 15% profit target)</span></p>",
+                    unsafe_allow_html=True
+                )
+            else:
+                st.markdown(
+                    "<p style='font-size:20px; font-weight:800; color:#008000;'>"
+                    "Position is risk-free — stop-loss is at or above breakeven.</p>",
+                    unsafe_allow_html=True
+                )
+
+        st.markdown("#### Closed Positions — Realized P/L")
+        closed_df = build_closed_lots_table(processed_trades, sel_type, sel_stock)
+        if closed_df.empty:
+            st.caption("No shares have been sold yet for this stock.")
+        else:
+            c_rows = []
+            for _, r in closed_df.iterrows():
+                pl, ret = r['Realized P/L'], r['Return %']
+                col = GREEN if pl >= 0 else RED
+                c_rows.append([
+                    (int(r['Cycle']), None),
+                    (fmt_date(r['Buy Date']), None), (fmt_num(r['Buy Price']), None),
+                    (fmt_date(r['Sell Date']), None), (fmt_num(r['Sell Price']), None),
+                    (fmt_num(r['Qty'], 0), None),
+                    (fmt_num(r['Invested'], 0), None), (fmt_num(r['Proceeds'], 0), None),
+                    (fmt_num(pl, 0), col),
+                    ("—" if pd.isna(ret) else f"{ret:.1%}", col),
+                    (int(r['Days Held']), None),
+                ])
+            render_compact_table(
+                ['Cycle', 'Buy Date', 'Buy ₹', 'Sell Date', 'Sell ₹', 'Qty',
+                 'Invested ₹', 'Proceeds ₹', 'Realized P/L ₹', 'Return', 'Days'],
+                c_rows, left_cols=(1, 3)
+            )
+            st.caption("Each row is a sale matched FIFO to the buy lot it closed. Cycle 2, 3… means the stock "
+                       "was bought again after the earlier position was fully squared off.")
+            tot_pl = closed_df['Realized P/L'].sum()
+            tot_inv = closed_df['Invested'].sum()
+            tot_col = GREEN if tot_pl >= 0 else RED
+            st.markdown(
+                f"<p style='font-size:20px; font-weight:800; color:{tot_col};'>"
+                f"Total Realized P/L: ₹{tot_pl:,.2f} "
+                f"<span style='font-size:14px; font-weight:400;'>"
+                f"({len(closed_df)} closed lot{'s' if len(closed_df) != 1 else ''}, {(tot_pl / tot_inv if tot_inv else 0):.1%} on ₹{tot_inv:,.0f} invested)"
+                f"</span></p>",
+                unsafe_allow_html=True
+            )
+
+elif page == "Trailing Stop Loss":
+    st.subheader("🛡️ Trailing Stop Loss")
+    if portfolio_df.empty:
+        st.info("No positions yet.")
+    else:
+        render_trailing_sl("🚀 Satellite Holdings", "SATELLITE")
+        render_trailing_sl("🎯 Core Holdings", "CORE")
+        st.caption("Trailing SL = the last stop-loss entered for the stock: your latest Shaktiman value "
+                   "(tranche 4+), otherwise the rule-based SL of its last tranche. Tranche = number of open "
+                   "tranches. Difference from CMP = CMP − Trailing SL (green = CMP above the stop, red = below). Stocks are listed with the most tranches first.")
+
+elif page == "Weekly Unrealized P/L":
+    st.subheader("📅 Weekly Unrealized P/L")
+    st.caption("Unrealized_PL of the stocks you held at each Friday's market close (FIFO cost, closing price of that day). "
+               "Only stocks you hold now are shown; the last 12 Fridays are kept.")
+    if not DATABASE_URL:
+        st.info("Weekly snapshots are stored in the database, which is not connected here.")
+    else:
+        if _weekly_missing:
+            _bad = "; ".join(f"{k}: {', '.join(v)}" for k, v in _weekly_missing.items())
+            st.warning(f"Could not price some stocks, so these weeks were not saved yet (will retry): {_bad}")
+        wk = weekly_load()
+        _held = held_now()
+        wk = wk[[ (str(t).upper(), str(x).strip().upper()) in _held for t, x in zip(wk['type'], wk['stock'])]] if len(wk) else wk
+        if wk.empty:
+            st.info("No weekly data saved yet.")
+        else:
+            wk['friday'] = pd.to_datetime(wk['friday'])
+            all_f = sorted(wk['friday'].unique(), reverse=True)
+            shown = all_f[:WEEKLY_KEEP]
+            tot_by_f = wk.groupby('friday')['unrealized'].sum()
+            def _lbl(f):
+                return pd.Timestamp(f).strftime("%d-%b-%y")
+            if IS_MOBILE:
+                pick = st.selectbox("Friday", [ _lbl(f) for f in all_f ], index=0)
+                f_sel = next(f for f in all_f if _lbl(f) == pick)
+                day = wk[wk['friday'] == f_sel]
+                cards = []
+                for ptype in ("SATELLITE", "CORE"):
+                    for _, r in day[day['type'] == ptype].sort_values('stock').iterrows():
+                        cards.append(card_html(title=r['stock'], badge=ptype.title(), right=money(r['unrealized']),
+                                               right_color=pl_color(r['unrealized']),
+                                               items=[("Units", f"{r['units']:,.0f}", None), ("Cost", money(r['cost']), None),
+                                                      ("Close", money(r['close']), None)]))
+                cards.append(card_html(title="Total", right=money(float(tot_by_f[f_sel])),
+                                       right_color=pl_color(float(tot_by_f[f_sel])), total=True, items=[]))
+                render_cards(cards)
+            else:
+                hdr = ['#', 'Stock'] + [_lbl(f) for f in shown]
+                for ptype, ttl in (("SATELLITE", "🚀 Satellite Holdings"), ("CORE", "🎯 Core Holdings")):
+                    sub = wk[(wk['type'] == ptype) & (wk['friday'].isin(shown))]
+                    if sub.empty:
+                        continue
+                    st.markdown(f"#### {ttl}")
+                    piv = sub.pivot_table(index='stock', columns='friday', values='unrealized', aggfunc='sum')
+                    order = sorted(piv.index)
+                    trs = []
+                    for i, stk in enumerate(order, start=1):
+                        cells = [(i, None), (stk, None)]
+                        for f in shown:
+                            v = piv.loc[stk].get(f, float('nan'))
+                            cells.append(("–", None) if pd.isna(v) else (money(v, 0), pl_color(v)))
+                        trs.append(cells)
+                    tots = [("", None), ("Total", None)]
+                    for f in shown:
+                        tv = float(sub[sub['friday'] == f]['unrealized'].sum()) if (sub['friday'] == f).any() else float('nan')
+                        tots.append(("–", None) if pd.isna(tv) else (money(tv, 0), pl_color(tv)))
+                    trs.append(tots)
+                    render_compact_table(hdr, trs, left_cols=(1,), total_last=True, font_px=12, fit=True, shrink=True)
+                st.markdown("#### 📊 All holdings")
+                tr1 = [("", None), ("Unrealized P/L", None)]
+                tr2 = [("", None), ("Change vs previous Friday", None)]
+                for f in shown:
+                    tv = float(tot_by_f[f])
+                    tr1.append((money(tv, 0), pl_color(tv)))
+                    fi = all_f.index(f)
+                    if fi + 1 < len(all_f):
+                        dv = tv - float(tot_by_f[all_f[fi + 1]])
+                        tr2.append((money(dv, 0), pl_color(dv)))
+                    else:
+                        tr2.append(("–", None))
+                render_compact_table(hdr, [tr1, tr2], left_cols=(1,), font_px=12, fit=True, shrink=True)
+        with st.expander("⚙️ Manage snapshots"):
+            st.caption("Snapshots are taken automatically for each completed Friday. Use these only to repair or extend history.")
+            c1, c2 = st.columns(2)
+            if c1.button("Recompute latest Friday (replace)"):
+                _f = completed_fridays(1)
+                _rows, _miss = weekly_compute(_f, processed_trades, overrides_df, held_now())
+                weekly_save(_rows, replace=True)
+                st.success(f"Saved {len(_rows)} stocks for {_f[0]:%d-%b-%Y}.") if _rows else st.warning(f"Not saved; unpriced: {_miss}")
+            if c2.button("Fill any missing Fridays (last 12 weeks)"):
+                _miss = weekly_catch_up()
+                st.success("Up to date.") if not _miss else st.warning(f"Not saved (unpriced stocks): { {k.isoformat(): v for k, v in _miss.items()} }")
+
+elif page == "Core & Satellite Audit":
+    st.subheader("🧾 Core & Satellite Audit")
+    if portfolio_df.empty:
+        st.info("No positions yet.")
+    else:
+        render_audit("🎯 Core Audit", "CORE", "SATELLITE")
+        render_audit("🚀 Satellite Audit", "SATELLITE", "CORE")
+        render_audit_split()
+        st.caption("Start Date = first buy date of the lots still held (FIFO). HP = whole months held. "
+                   "IC = Invested Value ÷ total invested (Core + Satellite + Cash). CC = Current Value ÷ total current value. "
+                   "ROI = Current ÷ Invested − 1. Cash = cash balance from the Cash Flow tab.")
+
+elif page == "FY P&L and Balance Sheet":
+    st.subheader("🏦 Financial-year Profit/Loss & Balance Sheet")
+    if not DATABASE_URL:
+        st.info("This report needs the database (deposits, transfers and charges).")
+    elif trades_df.empty:
+        st.info("No trades yet.")
+    else:
+        render_fy_reports()
+
+elif page == "Trade Book":
+    st.subheader("📒 Trade Book")
+    if trades_df.empty:
+        st.info("No trades recorded yet. Switch to ➕ Add Trade above to record one.")
+    else:
+        if st.session_state.get("mv_msg"):
+            st.success(st.session_state.pop("mv_msg"))
+        with st.expander("🔁 Move a stock between Satellite and Core"):
+            st.caption("Only the marking changes. No buy or sell is recorded: the stock's trades, stop-losses and weekly "
+                       "figures simply move to the other side. Its past realized P/L moves with it.")
+            mv_dir = st.radio("Move", ["SATELLITE → CORE", "CORE → SATELLITE"], horizontal=True, key="mv_dir")
+            _src, _dst = ("SATELLITE", "CORE") if mv_dir.startswith("SATELLITE") else ("CORE", "SATELLITE")
+            _held = portfolio_df[(portfolio_df['Type'] == _src) & (portfolio_df['Units'] > 0)] if not portfolio_df.empty else portfolio_df
+            _opts = sorted(_held['Stock'].astype(str).tolist()) if len(_held) else []
+            if not _opts:
+                st.info(f"No open {_src.title()} holdings to move.")
+            else:
+                mv_stock = st.selectbox("Stock", _opts, key="mv_stock")
+                _r = _held[_held['Stock'].astype(str) == mv_stock].iloc[0]
+                _clash = (not portfolio_df.empty) and bool(((portfolio_df['Type'] == _dst) & (portfolio_df['Stock'].astype(str) == mv_stock) & (portfolio_df['Units'] > 0)).any())
+                st.markdown(f"**{esc(mv_stock)}** · {int(_r['Units']):,} units · invested ₹{float(_r['Total_Cost']):,.2f} → will be counted as **{_dst.title()}**.")
+                if _clash:
+                    st.warning(f"You already hold {mv_stock} in {_dst.title()}; the two positions will be combined.")
+                if st.button(f"🔁 Move {mv_stock} to {_dst.title()}", type="primary", key="mv_go"):
+                    try:
+                        _n = move_stock_type(trades_df, overrides_df, mv_stock, _src, _dst)
+                        st.session_state["mv_msg"] = f"Moved {mv_stock} to {_dst.title()} ({_n} trades re-marked)."
+                        st.session_state["tb_ver"] = st.session_state.get("tb_ver", 0) + 1
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"Could not move the stock: {exc}")
+
+        tb_view = trades_df.copy()
+        tb_view['_id'] = tb_view.index
+        tb_view['Date of Trxn'] = pd.to_datetime(tb_view['Date of Trxn'])
+        tb_view['Amount'] = tb_view['Price'].astype(float) * tb_view['Unit'].astype(float)
+        tb_view['Action'] = tb_view['Unit'].apply(lambda u: 'BUY' if float(u) > 0 else 'SELL')
+
+        f1, f2, f3 = st.columns(3)
+        type_sel = f1.selectbox("Type", ["All", "CORE", "SATELLITE"])
+        stock_sel = f2.selectbox("Stock", ["All"] + sorted(tb_view['Stock'].astype(str).unique().tolist()))
+        action_sel = f3.selectbox("Action", ["All", "BUY", "SELL"])
+
+        if type_sel != "All":
+            tb_view = tb_view[tb_view['TYPE'] == type_sel]
+        if stock_sel != "All":
+            tb_view = tb_view[tb_view['Stock'].astype(str) == stock_sel]
+        if action_sel != "All":
+            tb_view = tb_view[tb_view['Action'] == action_sel]
+
+        tb_view = tb_view.sort_values('Date of Trxn', ascending=False).reset_index(drop=True)
+        tb_view.index = tb_view.index + 1
+        tb_view = tb_view[['TYPE', 'Stock', 'Date of Trxn', 'Action', 'Price', 'Unit', 'Amount', '_id']]
+
+        # ---- table: tick a row's checkbox, then use ✏️ Edit / 🗑️ Delete just below ----
+        if st.session_state.get("tb_msg"):
+            st.success(st.session_state.pop("tb_msg"))
+
+        disp = tb_view.drop(columns=['_id'])
+        ev = st.dataframe(
+            disp.style.format({
+                'Date of Trxn': lambda d: d.strftime('%d-%b-%Y'),
+                'Price': '₹{:,.2f}', 'Unit': '{:,.0f}', 'Amount': '₹{:,.2f}'
+            }),
+            use_container_width=True, on_select="rerun", selection_mode="single-row", key=f"tb_table_{st.session_state.get('tb_ver', 0)}"
+        )
+        sel_rows = ev.selection.rows if ev and ev.selection else []
+        sel_id = int(tb_view['_id'].iloc[sel_rows[0]]) if sel_rows and sel_rows[0] < len(tb_view) else None
+        if sel_id is None:
+            st.caption("👆 Tick the box at the left of a row to edit or delete that trade.")
+        else:
+            sr = tb_view.iloc[sel_rows[0]]
+            st.markdown(f"Selected: **{esc(str(sr['Stock']))}** · {sr['Date of Trxn'].strftime('%d-%b-%Y')} · "
+                        f"{sr['Action']} {abs(float(sr['Unit'])):,.0f} @ ₹{float(sr['Price']):,.2f}")
+            bb1, bb2, _sp = st.columns([1, 1, 3])
+            if bb1.button("✏️ Edit", key="tb_btn_edit", use_container_width=True):
+                st.session_state["tb_edit"] = sel_id
+                st.session_state["tb_del"] = None
+                st.rerun()
+            if bb2.button("🗑️ Delete", key="tb_btn_del", use_container_width=True):
+                st.session_state["tb_del"] = sel_id
+                st.session_state["tb_edit"] = None
+                st.rerun()
+
+        edit_id = st.session_state.get("tb_edit")
+        del_id = st.session_state.get("tb_del")
+        if edit_id is not None and edit_id not in trades_df.index:
+            edit_id = st.session_state["tb_edit"] = None
+        if del_id is not None and del_id not in trades_df.index:
+            del_id = st.session_state["tb_del"] = None
+
+        if edit_id is not None:
+            r = trades_df.loc[edit_id]
+            try:
+                r_date = pd.to_datetime(r['Date of Trxn']).date()
+            except Exception:
+                r_date = datetime.now().date()
+            with st.form(f"tb_edit_form_{edit_id}"):
+                st.markdown(f"**✏️ Edit trade — {esc(str(r['Stock']))}**")
+                e1, e2 = st.columns(2)
+                e_type = e1.selectbox("Type", ["CORE", "SATELLITE"], index=0 if str(r['TYPE']).upper() == "CORE" else 1)
+                e_stock = e2.text_input("Stock Symbol", value=str(r['Stock']))
+                e_date = e1.date_input("Transaction Date", r_date)
+                e_price = e2.number_input("Price per Unit (₹)", min_value=0.01, step=0.01, value=float(r['Price']))
+                e_units = e1.number_input("Units (+ Buy, − Sell)", step=1, value=int(float(r['Unit'])))
+                b1, b2 = st.columns(2)
+                do_save = b1.form_submit_button("💾 Save changes", type="primary")
+                do_cancel = b2.form_submit_button("Cancel")
+            if do_cancel:
+                st.session_state["tb_edit"] = None
+                st.rerun()
+            if do_save:
+                e_stock = e_stock.upper().strip()
+                if not e_stock or e_units == 0:
+                    st.warning("Stock symbol is required and Units cannot be 0.")
+                else:
+                    old_key = (str(r['TYPE']).upper(), str(r['Stock']).strip(), pd.to_datetime(r['Date of Trxn']).strftime('%Y-%m-%d'), round(float(r['Price']), 2))
+                    new_key = (e_type, e_stock, e_date.strftime('%Y-%m-%d'), round(float(e_price), 2))
+                    upd = trades_df.copy()
+                    upd.loc[edit_id, ['TYPE', 'Stock', 'Date of Trxn', 'Price', 'Unit', 'Amount']] = \
+                        [e_type, e_stock, e_date.strftime('%Y-%m-%d'), e_price, e_units, e_price * e_units]
+                    save_data(upd, overrides_df)
+                    if float(r['Unit']) > 0 and int(e_units) > 0:
+                        try:
+                            rekey_manual_sl(old_key, new_key)
+                        except Exception as exc:
+                            st.session_state["tb_msg"] = f"Trade updated, but its stop-loss could not be moved: {exc}"
+                    st.session_state["tb_edit"] = None
+                    st.session_state["tb_ver"] = st.session_state.get("tb_ver", 0) + 1
+                    st.session_state.setdefault("tb_msg", f"Updated trade for {e_stock}.")
+                    st.rerun()
+
+        if del_id is not None:
+            r = trades_df.loc[del_id]
+            st.warning(
+                f"Delete this trade? **{esc(str(r['Stock']))}** · {pd.to_datetime(r['Date of Trxn']).strftime('%d-%b-%Y')} · "
+                f"{'BUY' if float(r['Unit']) > 0 else 'SELL'} {abs(float(r['Unit'])):,.0f} @ ₹{float(r['Price']):,.2f}. "
+                f"This changes your holdings and P/L.")
+            d1, d2 = st.columns(2)
+            if d1.button("🗑️ Yes, delete", type="primary", key="tb_del_yes"):
+                upd = trades_df.drop(index=del_id).reset_index(drop=True)
+                save_data(upd, overrides_df)
+                st.session_state["tb_del"] = None
+                st.session_state["tb_ver"] = st.session_state.get("tb_ver", 0) + 1
+                st.session_state["tb_msg"] = f"Deleted trade for {str(r['Stock'])}."
+                st.rerun()
+            if d2.button("Cancel", key="tb_del_no"):
+                st.session_state["tb_del"] = None
+                st.rerun()
+
+        buys = tb_view[tb_view['Action'] == 'BUY']['Amount'].sum()
+        sells = -tb_view[tb_view['Action'] == 'SELL']['Amount'].sum()
+        st.markdown(
+            f"""
+            <div style='display:flex; justify-content:space-between; flex-wrap:wrap;
+                        padding:14px 18px; margin-top:10px; background-color:#F5F5F5;
+                        border-top:3px solid #6A1B9A; border-radius:4px;'>
+                <div style='font-size:20px; font-weight:800; color:#6A1B9A;'>Trades: {len(tb_view)}</div>
+                <div style='font-size:20px; font-weight:800; color:#6A1B9A;'>Total Bought: ₹{buys:,.2f}</div>
+                <div style='font-size:20px; font-weight:800; color:#6A1B9A;'>Total Sold: ₹{sells:,.2f}</div>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+        st.download_button(
+            "⬇️ Download as CSV",
+            tb_view.drop(columns=['_id']).to_csv(index=False).encode('utf-8'),
+            file_name="trade_book.csv",
+            mime="text/csv"
+        )
+
+elif page == "Add Trade":
+    st.subheader("📝 Record New Trade")
+    if st.session_state.get("trade_saved_msg"):
+        st.success(st.session_state.pop("trade_saved_msg"))
+    known_symbols = sorted(trades_df['Stock'].astype(str).str.strip().str.upper().unique().tolist()) \
+        if not trades_df.empty else []
+    with st.form("new_trade_form"):
+        c1, c2 = st.columns(2)
+        with c1:
+            p_type = st.selectbox("Type", ["CORE", "SATELLITE"])
+            stock = st.selectbox(
+                "Stock Symbol — type 2–3 letters to search",
+                known_symbols, index=None, accept_new_options=True,
+                placeholder="e.g. type BHE → BHEL  (new stock? type its full symbol)")
+            stock = (stock or "").upper().strip()
+            date = st.date_input("Transaction Date", datetime.now())
+        with c2:
+            price = st.number_input("Price per Unit (₹)", min_value=0.01, step=0.01)
+            units = st.number_input("Units (+ for Buy, - for Sell)", step=1)
+
+        submitted = st.form_submit_button("Save Transaction")
+        if submitted and not stock:
+            st.warning("Please pick or type a stock symbol first.")
+        if submitted and stock:
+            new_row = pd.DataFrame([{
+                'TYPE': p_type,
+                'Stock': stock,
+                'Date of Trxn': date.strftime('%Y-%m-%d'),
+                'Price': price,
+                'Unit': units,
+                'Amount': price * units
+            }])
+            updated_trades = pd.concat([trades_df, new_row], ignore_index=True)
+            save_data(updated_trades, overrides_df)
+            st.session_state["trade_saved_msg"] = (
+                f"Added trade for {stock} successfully!" if stock in known_symbols else
+                f"Added trade for {stock} — this is a NEW symbol (first trade for it). "
+                f"If that was a typo, tell me and I'll fix the Trade Book.")
+            st.rerun()
+
+elif page == "Cash Flow":
+    st.subheader("💰 Cash Flow")
+    if not DATABASE_URL:
+        st.info("The Cash Flow page needs the database (DATABASE_URL), which is not connected here.")
+        st.stop()
+    try:
+        ent, bal = load_cash()
+    except Exception as exc:
+        st.error(f"Could not read the cash-flow data: {exc}")
+        st.stop()
+
+    def _sum(df, kind):
+        return float(df.loc[df['kind'] == kind, 'amount'].sum()) if not df.empty else 0.0
+
+    held = portfolio_df[portfolio_df['Units'] > 0] if not portfolio_df.empty else portfolio_df
+    exposed = float(held['Total_Cost'].sum()) if len(held) else 0.0
+    equity_val = float(held['Total_Value'].sum()) if len(held) else 0.0
+    ovr = cash_get_override()
+    if ovr:
+        exposed, equity_val = ovr
+    dep, back = _sum(ent, 'DEPOSIT'), _sum(ent, 'TRANSFER_BACK')
+    bro_chg, dp_chg = _sum(ent, 'CHARGE'), _sum(ent, 'DP_CHARGE')
+    chg = bro_chg + dp_chg
+    cash_total = float(sum(bal.get(a, 0.0) for a in ACCOUNTS))
+    net_dep = dep - back
+    total_value = equity_val + cash_total   # worth now: shares at market value + cash
+    gross = equity_val + cash_total - net_dep
+    net_profit = gross - chg
+    ret = (net_profit / net_dep) if net_dep else float('nan')
+
+    st.markdown("#### Both accounts together")
+    kpi_grid([
+        ("Net Deployed", money(net_dep), None, None, None, "rgba(47,128,237,.20)"),
+        ("Total Amount Deployed", money(dep), None, None),
+        ("Total Transferred Back", money(back), None, None),
+        ("Total Value (equity + cash)", money(total_value), None, None, None, "rgba(0,166,126,.20)"),
+    ])
+    kpi_grid([
+        ("Exposed (Invested)", money(exposed), None, None),
+        ("Cash Balance", money(cash_total), None, None),
+        ("Equity Value on date", money(equity_val), None, None),
+    ])
+    kpi_grid([
+        ("Statutory & Broker Charges", money(bro_chg), None, None),
+        ("DP Charges", money(dp_chg), None, None),
+        ("Charges Total", money(chg), None, None),
+    ], narrow=True)
+    kpi_grid([
+        ("Gross Profit", money(gross), None, None, pl_color(gross)),
+        ("Net Profit", money(net_profit), None, None, pl_color(net_profit)),
+        ("Return on Net Deployed", "-" if pd.isna(ret) else f"{ret:.2%}", None, None, pl_color(net_profit)),
+    ])
+    st.caption(("Exposed and Equity Value are the figures you typed in (see ✏️ below)." if ovr else
+                "Exposed and Equity Value come from the holdings in this app (both accounts together).") +
+               " Gross Profit = Equity Value + Cash Balance − Net Deployed. Net Profit = Gross Profit − Statutory & Broker Charges − DP Charges.")
+
+    for acct in ACCOUNTS:
+        a_ent = ent[ent['account'] == acct]
+        a_dep, a_back = _sum(a_ent, 'DEPOSIT'), _sum(a_ent, 'TRANSFER_BACK')
+        a_bro, a_dp = _sum(a_ent, 'CHARGE'), _sum(a_ent, 'DP_CHARGE')
+        st.markdown(f"#### {acct}")
+        kpi_grid([
+            ("Deposits", money(a_dep), None, None),
+            ("Transferred Back", money(a_back), None, None),
+            ("Net Deployed", money(a_dep - a_back), None, None),
+            ("Statutory & Broker Charges", money(a_bro), None, None),
+            ("DP Charges", money(a_dp), None, None),
+            ("Cash Balance", money(bal.get(acct, 0.0)), None, None),
+        ])
+
+        def _dated_rows(kind):
+            sub = a_ent[a_ent['kind'] == kind]
+            rows = [[(i, None), (fmt_date(r['date']), None), (money(r['amount']), None)]
+                    for i, (_, r) in enumerate(sub.iterrows(), start=1)]
+            rows.append([("", None), ("Total", None), (money(float(sub['amount'].sum())), None)])
+            return rows
+
+        c1, c2, c3 = st.columns([1, 1, 1.5])
+        with c1:
+            st.markdown("**Deposits**")
+            render_compact_table(['#', 'Date', 'Amount'], _dated_rows('DEPOSIT'), left_cols=(1,),
+                                 auto_width=True, total_last=True, font_px=13)
+        with c2:
+            st.markdown("**Transferred back**")
+            render_compact_table(['#', 'Date', 'Amount'], _dated_rows('TRANSFER_BACK'), left_cols=(1,),
+                                 auto_width=True, total_last=True, font_px=13)
+        with c3:
+            st.markdown("**Charges** (by financial year)")
+            ch = a_ent[a_ent['kind'].isin(['CHARGE', 'DP_CHARGE'])]
+            fys = sorted(ch['label'].dropna().unique().tolist())
+            ch_rows = []
+            for fy in fys:
+                b_amt = float(ch.loc[(ch['label'] == fy) & (ch['kind'] == 'CHARGE'), 'amount'].sum())
+                d_amt = float(ch.loc[(ch['label'] == fy) & (ch['kind'] == 'DP_CHARGE'), 'amount'].sum())
+                ch_rows.append([(fy, None), (money(b_amt), None), (money(d_amt), None), (money(b_amt + d_amt), None)])
+            ch_rows.append([("Total", None), (money(a_bro), None), (money(a_dp), None), (money(a_bro + a_dp), None)])
+            render_compact_table(['Fin. year', 'Statutory & Broker', 'DP Charges', 'Total'], ch_rows, left_cols=(0,),
+                                 auto_width=True, total_last=True, font_px=13)
+
+    if st.session_state.get("cash_msg"):
+        st.success(st.session_state.pop("cash_msg"))
+
+    with st.expander("✏️ Add or update entries"):
+        with st.form("cash_flow_form", clear_on_submit=True):
+            st.markdown("**Record a deposit or a transfer back**")
+            f1, f2 = st.columns(2)
+            f_acct = f1.selectbox("Account", ACCOUNTS)
+            f_kind = f2.selectbox("Type", ["Deposit", "Transferred back"])
+            f_date = f1.date_input("Date", datetime.now())
+            f_amt = f2.number_input("Amount (₹)", min_value=0.0, step=100.0)
+            if st.form_submit_button("Save entry", type="primary"):
+                if f_amt <= 0:
+                    st.warning("Enter an amount above 0.")
+                else:
+                    cash_add_entry(f_acct, 'DEPOSIT' if f_kind == "Deposit" else 'TRANSFER_BACK', f_date, f_amt)
+                    st.session_state["cash_msg"] = f"Saved {f_kind.lower()} of {money(f_amt)} for {f_acct}."
+                    st.rerun()
+        with st.form("cash_charge_form", clear_on_submit=True):
+            st.markdown("**Charges for a financial year** (saving the same head and year again replaces its amount)")
+            g1, g2, g3, g4 = st.columns(4)
+            g_acct = g1.selectbox("Account", ACCOUNTS, key="chg_acct")
+            g_head = g2.selectbox("Charge head", ["Statutory & Broker Charges", "DP Charges"])
+            g_fy = g3.text_input("Financial year", value="2026-27")
+            g_amt = g4.number_input("Charges (₹)", min_value=0.0, step=1.0)
+            if st.form_submit_button("Save charges"):
+                if not g_fy.strip():
+                    st.warning("Enter the financial year, e.g. 2026-27.")
+                else:
+                    cash_set_charge(g_acct, g_fy.strip(), g_amt, 'DP_CHARGE' if g_head == "DP Charges" else 'CHARGE')
+                    st.session_state["cash_msg"] = f"Saved {g_head} of {money(g_amt)} for {g_acct}, {g_fy.strip()}."
+                    st.rerun()
+        with st.form("cash_holdings_form"):
+            st.markdown("**Exposed and Equity Value** — by default taken from this app's holdings. "
+                        "If your broker accounts hold more than the Trade Book, type the totals here.")
+            k1, k2 = st.columns(2)
+            k_exp = k1.number_input("Exposed / Invested (₹, both accounts)", min_value=0.0, step=100.0,
+                                    value=float(ovr[0]) if ovr else float(exposed))
+            k_eq = k2.number_input("Equity Value on date (₹, both accounts)", min_value=0.0, step=100.0,
+                                   value=float(ovr[1]) if ovr else float(equity_val))
+            kb1, kb2 = st.columns(2)
+            if kb1.form_submit_button("Use these figures"):
+                cash_set_override(k_exp, k_eq)
+                st.session_state["cash_msg"] = "Now using the figures you typed for Exposed and Equity Value."
+                st.rerun()
+            if kb2.form_submit_button("Use the app's holdings"):
+                cash_set_override(None, None)
+                st.session_state["cash_msg"] = "Now using the holdings from this app."
+                st.rerun()
+        with st.form("cash_balance_form"):
+            st.markdown("**Cash balance** (type the figure from your broker)")
+            h1, h2 = st.columns(2)
+            h_acct = h1.selectbox("Account", ACCOUNTS, key="bal_acct")
+            h_amt = h2.number_input("Cash balance (₹)", min_value=0.0, step=1.0)
+            if st.form_submit_button("Save cash balance"):
+                cash_set_balance(h_acct, h_amt)
+                st.session_state["cash_msg"] = f"Cash balance for {h_acct} set to {money(h_amt)}."
+                st.rerun()
+
+    with st.expander("🗑️ Remove an entry"):
+        if ent.empty:
+            st.caption("No entries.")
+        else:
+            names = {int(r['id']): (f"{r['account']} · {'Deposit' if r['kind'] == 'DEPOSIT' else 'Transferred back' if r['kind'] == 'TRANSFER_BACK' else ('DP Charges ' if r['kind'] == 'DP_CHARGE' else 'Statutory & Broker Charges ') + str(r['label'])}"
+                                    f"{'' if pd.isna(r['date']) else ' · ' + fmt_date(r['date'])} · {money(r['amount'])}")
+                     for _, r in ent.iterrows()}
+            pick = st.selectbox("Entry", list(names.keys()), format_func=lambda i: names[i], index=None,
+                                placeholder="Pick the entry to remove")
+            sure = st.checkbox("Yes, remove it")
+            if st.button("🗑️ Remove entry", disabled=not (pick is not None and sure)):
+                cash_delete_entry(pick)
+                st.session_state["cash_msg"] = f"Removed: {names[pick]}"
+                st.rerun()
+
+elif page == "CMP Overrides":
+    st.subheader("⚙️ Price Overrides")
+    st.info("Add a row here if the automated price lags or fails for a symbol.")
+    edited_override = st.data_editor(overrides_df, num_rows="dynamic", use_container_width=True)
+    if st.button("Save Overrides"):
+        save_data(trades_df, edited_override)
+        st.success("Overrides updated!")
+        st.rerun()
