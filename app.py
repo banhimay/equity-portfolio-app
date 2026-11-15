@@ -784,7 +784,7 @@ PYRAMID_CAPITAL = 1_000_000
 IDEAL_PYRAMID = [("T1", 2.00), ("T2", 1.75), ("T3", 1.50), ("T4", 1.00), ("T5", 0.75)]
 PYRAMID_COLORS = ["#1565C0", "#0E8A72", "#C97A00", "#6A47C2", "#D9414E", "#8E2C48"]
 
-def render_tranche_pyramids(tranche_df, stock, ptype):
+def render_tranche_pyramids(tranche_df, stock, ptype, cap_base=None, ic_pct=None):
     """Small boxed SVG: the ideal pyramid on the left, what has actually been bought on the right
     (amount and qty inside each band, share of this stock's total investment to the right)."""
     esc = html_lib.escape
@@ -799,7 +799,7 @@ def render_tranche_pyramids(tranche_df, stock, ptype):
     top, foot = 40.0, 30.0
     H = top + slots * BAND + foot
     ybot = top + slots * BAND
-    cx_i, cx_a, div_x, pct_x = 166.0, 471.0, 330.0, 600.0
+    cx_i, cx_a, div_x, pct_x = 166.0, 468.0, 330.0, 588.0
     out = [f"<svg viewBox='0 0 660 {H:.0f}' xmlns='http://www.w3.org/2000/svg' "
            f"style='width:100%;max-width:440px;display:block;font-family:sans-serif;'>"
            f"<rect x='2' y='2' width='656' height='{H-4:.0f}' rx='12' fill='none' stroke='rgba(128,128,128,0.55)' stroke-width='1.5'/>"
@@ -822,6 +822,7 @@ def render_tranche_pyramids(tranche_df, stock, ptype):
     out.append(f"<text x='{cx_i}' y='25' text-anchor='middle' fill='currentColor' font-size='16' font-weight='700'>Ideal pyramid</text>")
     # actual
     tot = sum(inv) or 1.0
+    cap = cap_base if (cap_base and cap_base > 0) else PYRAMID_CAPITAL   # capital base of the dashboard's Allocation_% / IC%
     widths = [max(min(a / (PYRAMID_CAPITAL * IDEAL_PYRAMID[0][1] / 100), 1.0), 0.45) * W0 for a in inv]
     for i in range(n_act):
         y1, y0 = ybot - i * BAND, ybot - (i + 1) * BAND + GAP
@@ -833,11 +834,11 @@ def render_tranche_pyramids(tranche_df, stock, ptype):
         out.append(f"<text x='{cx_a}' y='{(y0+y1)/2-4:.1f}' text-anchor='middle' fill='#fff' font-size='15' font-weight='700'>T{i+1}</text>"
                    f"<text x='{cx_a}' y='{(y0+y1)/2+15:.1f}' text-anchor='middle' fill='#fff' font-size='13' font-weight='700'>"
                    f"₹{inv[i]:,.0f} ({qtys[i]:,.0f} qty)</text>"
-                   f"<text x='{pct_x}' y='{(y0+y1)/2+6:.1f}' fill='{col}' font-size='16' font-weight='700'>{inv[i]/tot*100:.1f}%</text>")
+                   f"<text x='{pct_x}' y='{(y0+y1)/2+6:.1f}' fill='{col}' font-size='14' font-weight='700'>{inv[i]/cap*100:.2f}%</text>")
     out.append(f"<text x='{cx_a}' y='25' text-anchor='middle' fill='currentColor' font-size='16' font-weight='700'>"
                f"Actual — {esc(str(stock))} ({esc(str(ptype).title())})</text>")
     out.append(f"<text x='{cx_a}' y='{H-10:.0f}' text-anchor='middle' fill='currentColor' fill-opacity='0.65' font-size='13'>"
-               f"Invested ₹{tot:,.0f} · {sum(qtys):,.0f} qty · % = share of it</text></svg>")
+               f"₹{tot:,.0f} · {sum(qtys):,.0f} qty · IC {(ic_pct if ic_pct is not None else tot/cap):.1%}</text></svg>")
     st.markdown("".join(out), unsafe_allow_html=True)
 
 def build_closed_lots_table(df, ptype, stock):
@@ -2473,6 +2474,7 @@ elif page == "Individual Stock":
                        "at the current price. XIRR is the single annual rate that makes all these dated flows add up to zero. "
                        "It is before brokerage and taxes. Dividends are those recorded in the Cash Flow tab.")
 
+        _closed_left = False
         if not lots:
             st.info("No open position — this stock is fully squared off. Its realized results are below.")
         else:
@@ -2634,6 +2636,8 @@ elif page == "Individual Stock":
                         render_compact_table(['When (IST)', 'Tranche (bought)', 'Stop-loss ₹'], h_rows,
                                              left_cols=(0, 1), auto_width=True)
 
+            _closed_pre = build_closed_lots_table(processed_trades, sel_type, sel_stock)
+            _closed_left = _closed_pre.empty        # nothing sold yet: the short note sits under Risk : Reward
             _lad_col, _pyr_col = st.columns([1, 1])
             with _lad_col:
                 st.markdown("#### Profit Target Ladder")
@@ -2645,33 +2649,43 @@ elif page == "Individual Stock":
                      + [(fmt_num(cmp_price), None)]],
                     left_cols=(0,), auto_width=True
                 )
+                st.markdown("#### Risk : Reward")
+                reward_15pct = total_investment * 0.15
+                if sl_pending:
+                    st.caption("Enter the Shaktiman stop-loss above to see Risk : Reward.")
+                elif current_risk > 0:
+                    ratio = reward_15pct / current_risk
+                    st.markdown(
+                        f"<p style='font-size:20px; font-weight:800; color:#8B0000;'>"
+                        f"1 : {ratio:.1f}  <span style='font-size:14px; font-weight:400; color:#555;'>"
+                        f"(risk ₹{current_risk:,.0f} vs. reward at 15% profit target)</span></p>",
+                        unsafe_allow_html=True
+                    )
+                else:
+                    st.markdown(
+                        "<p style='font-size:20px; font-weight:800; color:#008000;'>"
+                        "Position is risk-free — stop-loss is at or above breakeven.</p>",
+                        unsafe_allow_html=True
+                    )
+                if _closed_left:
+                    st.markdown("#### Closed Positions — Realized P/L")
+                    st.caption("No shares have been sold yet for this stock.")
             with _pyr_col:
                 st.markdown("#### Tranching Pyramid")
-                render_tranche_pyramids(tranche_df, sel_stock, sel_type)
+                # IC (%) exactly as on the Core & Satellite Audit page: invested value ÷ (Core + Satellite invested + cash)
+                _own, _oth = audit_rows(sel_type), audit_rows("SATELLITE" if sel_type == "CORE" else "CORE")
+                _ic_base = sum(r['Inv'] for r in _own) + sum(r['Inv'] for r in _oth) + audit_cash_base()
+                _me = next((r for r in _own if str(r['Stock']).strip().upper() == str(sel_stock).strip().upper()), None)
+                render_tranche_pyramids(tranche_df, sel_stock, sel_type,
+                                        cap_base=_ic_base if _ic_base > 0 else None,
+                                        ic_pct=(_me['Inv'] / _ic_base) if (_me and _ic_base > 0) else None)
 
-            st.markdown("#### Risk : Reward")
-            reward_15pct = total_investment * 0.15
-            if sl_pending:
-                st.caption("Enter the Shaktiman stop-loss above to see Risk : Reward.")
-            elif current_risk > 0:
-                ratio = reward_15pct / current_risk
-                st.markdown(
-                    f"<p style='font-size:20px; font-weight:800; color:#8B0000;'>"
-                    f"1 : {ratio:.1f}  <span style='font-size:14px; font-weight:400; color:#555;'>"
-                    f"(risk ₹{current_risk:,.0f} vs. reward at 15% profit target)</span></p>",
-                    unsafe_allow_html=True
-                )
-            else:
-                st.markdown(
-                    "<p style='font-size:20px; font-weight:800; color:#008000;'>"
-                    "Position is risk-free — stop-loss is at or above breakeven.</p>",
-                    unsafe_allow_html=True
-                )
-
-        st.markdown("#### Closed Positions — Realized P/L")
         closed_df = build_closed_lots_table(processed_trades, sel_type, sel_stock)
+        if not closed_df.empty or not _closed_left:
+            st.markdown("#### Closed Positions — Realized P/L")
         if closed_df.empty:
-            st.caption("No shares have been sold yet for this stock.")
+            if not _closed_left:
+                st.caption("No shares have been sold yet for this stock.")
         else:
             c_rows = []
             for _, r in closed_df.iterrows():
