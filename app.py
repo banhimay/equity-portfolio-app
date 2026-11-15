@@ -2575,9 +2575,11 @@ elif page == "Individual Stock":
 
             st.markdown("#### Profit Target Ladder")
             pcts = [10, 15, 20, 25]
+            _cur_pct = (cmp_price / weighted_avg - 1) * 100 if weighted_avg else 0
             render_compact_table(
-                ['Profit target'] + [f"+{p}%" for p in pcts],
-                [[("Target price ₹", None)] + [(fmt_num(weighted_avg * (1 + p / 100)), None) for p in pcts]],
+                ['Profit target'] + [f"+{p}%" for p in pcts] + [f"Current {_cur_pct:+.1f}%"],
+                [[("Target price ₹", None)] + [(fmt_num(weighted_avg * (1 + p / 100)), None) for p in pcts]
+                 + [(fmt_num(cmp_price), None)]],
                 left_cols=(0,), auto_width=True
             )
 
