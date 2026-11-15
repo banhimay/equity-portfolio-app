@@ -779,6 +779,67 @@ def render_compact_table(headers, rows, left_cols=(), auto_width=False, total_la
 def fmt_date(d):
     return f"{d.day}-{d.strftime('%b-%Y')}"
 
+# Ideal tranching pyramid: % of the ₹10 lakh capital to put in each tranche (total 7.00%)
+PYRAMID_CAPITAL = 1_000_000
+IDEAL_PYRAMID = [("T1", 2.00), ("T2", 1.75), ("T3", 1.50), ("T4", 1.00), ("T5", 0.75)]
+PYRAMID_COLORS = ["#1565C0", "#0E8A72", "#C97A00", "#6A47C2", "#D9414E", "#8E2C48"]
+
+def render_tranche_pyramids(tranche_df, stock, ptype):
+    """Small boxed SVG: the ideal pyramid on the left, what has actually been bought on the right
+    (amount and qty inside each band, share of this stock's total investment to the right)."""
+    esc = html_lib.escape
+    U = 314.0                                   # px per data unit
+    BAND, GAP = 52.0, 2.0
+    W0 = 0.92 * 0.9 * U                         # width of the widest (bottom) band
+    n_ideal = len(IDEAL_PYRAMID)
+    inv = [float(x) for x in tranche_df['Investment']]
+    qtys = [float(x) for x in tranche_df['Qty']]
+    n_act = len(inv)
+    slots = max(n_ideal, n_act)
+    top, foot = 40.0, 30.0
+    H = top + slots * BAND + foot
+    ybot = top + slots * BAND
+    cx_i, cx_a, div_x, pct_x = 166.0, 471.0, 330.0, 600.0
+    out = [f"<svg viewBox='0 0 660 {H:.0f}' xmlns='http://www.w3.org/2000/svg' "
+           f"style='width:100%;max-width:440px;display:block;font-family:sans-serif;'>"
+           f"<rect x='2' y='2' width='656' height='{H-4:.0f}' rx='12' fill='none' stroke='rgba(128,128,128,0.55)' stroke-width='1.5'/>"
+           f"<line x1='{div_x}' y1='14' x2='{div_x}' y2='{H-14:.0f}' stroke='rgba(128,128,128,0.35)'/>"]
+    # ideal: straight-sided pyramid
+    def w_at(k):                                # width at height k (in bands) of the ideal pyramid
+        return W0 * (1 - 0.6 * k / n_ideal)
+    for i, (t, pct) in enumerate(IDEAL_PYRAMID):
+        y1, y0 = ybot - i * BAND, ybot - (i + 1) * BAND + GAP
+        wb, wt = w_at(i), w_at(i + 1)
+        col = PYRAMID_COLORS[i]
+        out.append(f"<polygon fill='{col}' points='{cx_i-wb/2:.1f},{y1:.1f} {cx_i+wb/2:.1f},{y1:.1f} "
+                   f"{cx_i+wt/2:.1f},{y0:.1f} {cx_i-wt/2:.1f},{y0:.1f}'/>")
+        amt = PYRAMID_CAPITAL * pct / 100
+        out.append(f"<text x='{cx_i}' y='{(y0+y1)/2-4:.1f}' text-anchor='middle' fill='#fff' font-size='15' font-weight='700'>{t} · {pct:.2f}%</text>"
+                   f"<text x='{cx_i}' y='{(y0+y1)/2+15:.1f}' text-anchor='middle' fill='#fff' font-size='14' font-weight='700'>₹{amt:,.0f}</text>")
+    tot_pct = sum(p for _, p in IDEAL_PYRAMID)
+    out.append(f"<text x='{cx_i}' y='{H-10:.0f}' text-anchor='middle' fill='currentColor' fill-opacity='0.65' font-size='13'>"
+               f"Total {tot_pct:.2f}% of ₹{PYRAMID_CAPITAL/100000:g} lakh · ₹{PYRAMID_CAPITAL*tot_pct/100:,.0f}</text>")
+    out.append(f"<text x='{cx_i}' y='25' text-anchor='middle' fill='currentColor' font-size='16' font-weight='700'>Ideal pyramid</text>")
+    # actual
+    tot = sum(inv) or 1.0
+    widths = [max(min(a / (PYRAMID_CAPITAL * IDEAL_PYRAMID[0][1] / 100), 1.0), 0.45) * W0 for a in inv]
+    for i in range(n_act):
+        y1, y0 = ybot - i * BAND, ybot - (i + 1) * BAND + GAP
+        wb = widths[i]
+        wt = widths[i + 1] if i + 1 < n_act else wb * 0.85
+        col = PYRAMID_COLORS[i % len(PYRAMID_COLORS)]
+        out.append(f"<polygon fill='{col}' points='{cx_a-wb/2:.1f},{y1:.1f} {cx_a+wb/2:.1f},{y1:.1f} "
+                   f"{cx_a+wt/2:.1f},{y0:.1f} {cx_a-wt/2:.1f},{y0:.1f}'/>")
+        out.append(f"<text x='{cx_a}' y='{(y0+y1)/2-4:.1f}' text-anchor='middle' fill='#fff' font-size='15' font-weight='700'>T{i+1}</text>"
+                   f"<text x='{cx_a}' y='{(y0+y1)/2+15:.1f}' text-anchor='middle' fill='#fff' font-size='13' font-weight='700'>"
+                   f"₹{inv[i]:,.0f} ({qtys[i]:,.0f} qty)</text>"
+                   f"<text x='{pct_x}' y='{(y0+y1)/2+6:.1f}' fill='{col}' font-size='16' font-weight='700'>{inv[i]/tot*100:.1f}%</text>")
+    out.append(f"<text x='{cx_a}' y='25' text-anchor='middle' fill='currentColor' font-size='16' font-weight='700'>"
+               f"Actual — {esc(str(stock))} ({esc(str(ptype).title())})</text>")
+    out.append(f"<text x='{cx_a}' y='{H-10:.0f}' text-anchor='middle' fill='currentColor' fill-opacity='0.65' font-size='13'>"
+               f"Invested ₹{tot:,.0f} · {sum(qtys):,.0f} qty · % = share of it</text></svg>")
+    st.markdown("".join(out), unsafe_allow_html=True)
+
 def build_closed_lots_table(df, ptype, stock):
     """Every sale matched FIFO against the buy lots it consumed, one row per matched piece.
     'Cycle' counts rounds of buying: it goes up when the stock is bought again after the
@@ -2573,15 +2634,20 @@ elif page == "Individual Stock":
                         render_compact_table(['When (IST)', 'Tranche (bought)', 'Stop-loss ₹'], h_rows,
                                              left_cols=(0, 1), auto_width=True)
 
-            st.markdown("#### Profit Target Ladder")
-            pcts = [10, 15, 20, 25]
-            _cur_pct = (cmp_price / weighted_avg - 1) * 100 if weighted_avg else 0
-            render_compact_table(
-                ['Profit target'] + [f"+{p}%" for p in pcts] + [f"Current {_cur_pct:+.1f}%"],
-                [[("Target price ₹", None)] + [(fmt_num(weighted_avg * (1 + p / 100)), None) for p in pcts]
-                 + [(fmt_num(cmp_price), None)]],
-                left_cols=(0,), auto_width=True
-            )
+            _lad_col, _pyr_col = st.columns([1, 1])
+            with _lad_col:
+                st.markdown("#### Profit Target Ladder")
+                pcts = [10, 15, 20, 25]
+                _cur_pct = (cmp_price / weighted_avg - 1) * 100 if weighted_avg else 0
+                render_compact_table(
+                    ['Profit target'] + [f"+{p}%" for p in pcts] + [f"Current {_cur_pct:+.1f}%"],
+                    [[("Target price ₹", None)] + [(fmt_num(weighted_avg * (1 + p / 100)), None) for p in pcts]
+                     + [(fmt_num(cmp_price), None)]],
+                    left_cols=(0,), auto_width=True
+                )
+            with _pyr_col:
+                st.markdown("#### Tranching Pyramid")
+                render_tranche_pyramids(tranche_df, sel_stock, sel_type)
 
             st.markdown("#### Risk : Reward")
             reward_15pct = total_investment * 0.15
