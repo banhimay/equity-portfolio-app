@@ -95,6 +95,8 @@ def _load_data_xlsx():
     else:
         tb = pd.DataFrame(columns=['TYPE', 'Stock', 'Date of Trxn', 'Price', 'Unit', 'Amount'])
         co = pd.DataFrame(columns=['Stock', 'Manual CMP', 'Note'])
+    if 'Account' not in tb.columns:
+        tb['Account'] = None
     return tb, co
 
 def _db_write_trades(cur, tb, co):
@@ -103,9 +105,11 @@ def _db_write_trades(cur, tb, co):
     rows = []
     for _, r in tb.iterrows():
         d = pd.to_datetime(r['Date of Trxn']).strftime('%Y-%m-%d')
-        rows.append((str(r['TYPE']).strip().upper(), str(r['Stock']).strip(), d, float(r['Price']), float(r['Unit'])))
+        acct = r.get('Account') if 'Account' in tb.columns else None
+        acct = None if (acct is None or pd.isna(acct) or str(acct).strip() == '') else str(acct).strip()
+        rows.append((str(r['TYPE']).strip().upper(), str(r['Stock']).strip(), d, float(r['Price']), float(r['Unit']), acct))
     if rows:
-        cur.executemany("INSERT INTO trades (type, stock, trade_date, price, unit) VALUES (%s,%s,%s,%s,%s)", rows)
+        cur.executemany("INSERT INTO trades (type, stock, trade_date, price, unit, account) VALUES (%s,%s,%s,%s,%s,%s)", rows)
     cur.execute("DELETE FROM cmp_override")
     crow = []
     for _, r in co.iterrows():
@@ -122,8 +126,8 @@ def load_data():
         try:
             db_init()
             with db_connect() as conn, conn.cursor() as cur:
-                cur.execute("SELECT type, stock, trade_date, price::float, unit::float FROM trades ORDER BY id")
-                tb = pd.DataFrame(cur.fetchall(), columns=['TYPE', 'Stock', 'Date of Trxn', 'Price', 'Unit'])
+                cur.execute("SELECT type, stock, trade_date, price::float, unit::float, account FROM trades ORDER BY id")
+                tb = pd.DataFrame(cur.fetchall(), columns=['TYPE', 'Stock', 'Date of Trxn', 'Price', 'Unit', 'Account'])
                 cur.execute("SELECT stock, manual_cmp::float, note FROM cmp_override ORDER BY id")
                 co = pd.DataFrame(cur.fetchall(), columns=['Stock', 'Manual CMP', 'Note'])
         except Exception as exc:
@@ -155,6 +159,7 @@ def db_init():
         cur.execute("""CREATE TABLE IF NOT EXISTS trades (
             id serial PRIMARY KEY, type text NOT NULL, stock text NOT NULL, trade_date text NOT NULL,
             price numeric(14,4) NOT NULL, unit numeric(14,4) NOT NULL)""")
+        cur.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS account text")
         cur.execute("""CREATE TABLE IF NOT EXISTS cmp_override (
             id serial PRIMARY KEY, stock text NOT NULL, manual_cmp numeric(14,4) NOT NULL, note text)""")
         cur.execute("CREATE TABLE IF NOT EXISTS app_meta (key text PRIMARY KEY, value text)")
@@ -1268,6 +1273,9 @@ def fy_reports(trades, entries):
         c_fy = ch[ch['label'] == fy]
         sb = float(c_fy[c_fy['kind'] == 'CHARGE']['amount'].sum())
         dp = float(c_fy[c_fy['kind'] == 'DP_CHARGE']['amount'].sum())
+        dv_all = entries[(entries['kind'] == 'DIVIDEND') & entries['date'].notna()]
+        div_fy = float(dv_all[dv_all['date'].apply(lambda x: fy_label(x.date() if hasattr(x, 'date') else x)) == fy]['amount'].sum()) if len(dv_all) else 0.0
+        div_cum = float(dv_all[dv_all['date'] <= ts]['amount'].sum()) if len(dv_all) else 0.0
         # cumulative to the date
         en = entries[entries['date'].notna() & (entries['date'] <= ts)]
         dep = float(en[en['kind'] == 'DEPOSIT']['amount'].sum())
@@ -1279,7 +1287,7 @@ def fy_reports(trades, entries):
         real_cum = float(sales[sales['sell_date'] <= ts]['pnl'].sum()) if not sales.empty else 0.0
         cash = dep - back - bought + sold_p - ch_cum
         out[fy] = {'asof': asof, 'current': current, 'proceeds': proceeds, 'cost_sold': cost_sold, 'stcg': stc, 'ltcg': ltc,
-                   'sb': sb, 'dp': dp, 'unreal': unreal, 'd_unreal': unreal - prev_unreal,
+                   'sb': sb, 'dp': dp, 'div': div_fy, 'div_cum': div_cum, 'unreal': unreal, 'd_unreal': unreal - prev_unreal,
                    'mv_core': mv['CORE'], 'mv_sat': mv['SATELLITE'], 'cost_open': sum(cost_open.values()), 'cash': cash,
                    'capital': dep - back, 'real_net_cum': real_cum - ch_cum}
         prev_unreal = unreal
@@ -1311,8 +1319,10 @@ def render_fy_reports():
         line("Less: Statutory & Broker charges", fn=lambda r: -r['sb']),
         line("Less: DP charges", fn=lambda r: -r['dp']),
         line("Net realized profit/(loss)", fn=lambda r: r['stcg'] + r['ltcg'] - r['sb'] - r['dp'], bold=True),
+        line("Add: Dividend income", 'div'),
+        line("Net realized profit/(loss) incl. dividends", fn=lambda r: r['stcg'] + r['ltcg'] - r['sb'] - r['dp'] + r['div'], bold=True),
         line("Add: change in unrealized gain/(loss) during the year", 'd_unreal'),
-        line("Total profit/(loss) for the year", fn=lambda r: r['stcg'] + r['ltcg'] - r['sb'] - r['dp'] + r['d_unreal'], bold=True),
+        line("Total profit/(loss) for the year", fn=lambda r: r['stcg'] + r['ltcg'] - r['sb'] - r['dp'] + r['div'] + r['d_unreal'], bold=True),
     ]
     render_compact_table(["Particulars"] + cols, pl_rows, left_cols=(0,), total_last=True, font_px=12, fit=True, shrink=True)
     st.markdown("### 📗 Balance Sheet")
@@ -1330,6 +1340,8 @@ def render_fy_reports():
     ]
     render_compact_table(["Particulars"] + cols, bs_rows, left_cols=(0,), total_last=True, font_px=12, fit=True, shrink=True)
     st.caption("Memo: holdings at cost  " + "  |  ".join(f"FY {fy}: {money(R[fy]['cost_open'], 0)}" for fy in fys))
+    st.caption("Memo: dividends received to date (credited to your bank, so not in the broker-cash line above)  " +
+               "  |  ".join(f"FY {fy}: {money(R[fy]['div_cum'], 0)}" for fy in fys))
     last = R[all_fys[-1]]
     typed = audit_cash_total()
     if abs(typed - last['cash']) >= 1:
@@ -1340,7 +1352,8 @@ def render_fy_reports():
         st.warning("No closing price found for: " + ", ".join(unpriced) + ". Those holdings are carried at cost in the affected years.")
     st.caption("Financial year = 1 April to 31 March. Realized gains use FIFO and the holding period from buy date to sale date. "
                "Year-end values use the closing price of the last trading day on or before 31 March (current year: latest price). "
-               "Charges are taken from the Cash Flow tab by financial year. Dividends and other income are not included.")
+               "Charges and dividends are taken from the Cash Flow tab (dividends by ex-date, in the financial year they fall in). "
+               "Dividends are shown as income in the Profit & Loss account; they go to your bank, so the Balance Sheet's broker cash does not include them.")
     with st.expander("🔎 Sales behind the realized profit/(loss)"):
         if sales.empty:
             st.caption("No sales yet.")
@@ -2787,6 +2800,10 @@ elif page == "Trade Book":
         type_sel = f1.selectbox("Type", ["All", "CORE", "SATELLITE"])
         stock_sel = f2.selectbox("Stock", ["All"] + sorted(tb_view['Stock'].astype(str).unique().tolist()))
         action_sel = f3.selectbox("Action", ["All", "BUY", "SELL"])
+        acct_sel = st.selectbox("Account", ["All"] + ACCOUNTS, key="tb_acct_sel")
+        tb_view['Account'] = tb_view['Account'].fillna('')
+        if acct_sel != "All":
+            tb_view = tb_view[tb_view['Account'] == acct_sel]
 
         if type_sel != "All":
             tb_view = tb_view[tb_view['TYPE'] == type_sel]
@@ -2797,7 +2814,7 @@ elif page == "Trade Book":
 
         tb_view = tb_view.sort_values('Date of Trxn', ascending=False).reset_index(drop=True)
         tb_view.index = tb_view.index + 1
-        tb_view = tb_view[['TYPE', 'Stock', 'Date of Trxn', 'Action', 'Price', 'Unit', 'Amount', '_id']]
+        tb_view = tb_view[['Account', 'TYPE', 'Stock', 'Date of Trxn', 'Action', 'Price', 'Unit', 'Amount', '_id']]
 
         # ---- table: tick a row's checkbox, then use ✏️ Edit / 🗑️ Delete just below ----
         if st.session_state.get("tb_msg"):
@@ -2848,7 +2865,7 @@ elif page == "Trade Book":
                 e_type = e1.selectbox("Type", ["CORE", "SATELLITE"], index=0 if str(r['TYPE']).upper() == "CORE" else 1)
                 e_stock = e2.text_input("Stock Symbol", value=str(r['Stock']))
                 e_date = e1.date_input("Transaction Date", r_date)
-                e_price = e2.number_input("Price per Unit (₹)", min_value=0.01, step=0.01, value=float(r['Price']))
+                e_price = e2.number_input("Price per Unit (₹)", min_value=0.0, step=0.01, value=float(r['Price']), format="%.4f")
                 e_units = e1.number_input("Units (+ Buy, − Sell)", step=1, value=int(float(r['Unit'])))
                 b1, b2 = st.columns(2)
                 do_save = b1.form_submit_button("💾 Save changes", type="primary")
@@ -2934,7 +2951,7 @@ elif page == "Add Trade":
             stock = (stock or "").upper().strip()
             date = st.date_input("Transaction Date", datetime.now())
         with c2:
-            price = st.number_input("Price per Unit (₹)", min_value=0.01, step=0.01)
+            price = st.number_input("Price per Unit (₹)", min_value=0.01, step=0.01, format="%.4f")
             units = st.number_input("Units (+ for Buy, - for Sell)", step=1)
 
         submitted = st.form_submit_button("Save Transaction")
