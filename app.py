@@ -1188,17 +1188,19 @@ def render_audit(title, ptype, other_type):
     if IS_MOBILE:
         cards = []
         for i, r in enumerate(own, start=1):
-            cards.append(card_html(
-                title=f"{i}. {r['Stock']}", right=f"{r['ROI']:+.1%}", right_color=pl_color(r['ROI']),
+            st.button(f"{i}.  {r['Stock']}", key=f"aub_{ptype}_{i}_{r['Stock']}", type="tertiary",
+                      on_click=go_to_stock, args=(stock_label(ptype, r['Stock']),))
+            render_cards([card_html(
+                right=f"{r['ROI']:+.1%}", right_color=pl_color(r['ROI']),
                 items=[("Start", fmt_date(pd.Timestamp(r['Start'])) if r['Start'] else "-", None), ("HP (month)", "-" if r['HP'] is None else str(r['HP']), None),
                        ("Qty", f"{r['Qty']:,}", None), ("Avg buy", money(r['Avg']), None), ("CMP", money(r['CMP']), None),
                        ("Invested", money(r['Inv']), None), ("Current", money(r['Cur']), None),
-                       ("IC", pct(r['Inv'], inv_all), None), ("CC", pct(r['Cur'], cur_all), None)]))
-        render_cards(cards)
+                       ("IC", pct(r['Inv'], inv_all), None), ("CC", pct(r['Cur'], cur_all), None)])])
     else:
+        stock_link_pills(ptype, [r['Stock'] for r in own], f"au_open_{ptype}")
         rows = []
         for i, r in enumerate(own, start=1):
-            rows.append([(i, None), (r['Stock'], None), (fmt_date(pd.Timestamp(r['Start'])) if r['Start'] else "-", None),
+            rows.append([(i, None), (("LINK", f"au_open_{ptype}", r['Stock']), None), (fmt_date(pd.Timestamp(r['Start'])) if r['Start'] else "-", None),
                          (f"{r['Qty']:,}", None), (money(r['Avg']), None), (money(r['CMP']), None),
                          (money(r['Inv']), None), (money(r['Cur']), None),
                          ("-" if r['HP'] is None else r['HP'], None),
@@ -1759,21 +1761,25 @@ def render_pl_booked(title, df, is_loss):
         return
     total = df['Realized_PL'].sum()
     tint, ink = ("#FDE2E2", "#B71C1C") if is_loss else ("#DFF5E1", "#1B5E20")
+    kind = "loss" if is_loss else "profit"
     if IS_MOBILE:
-        cards = []
         for i, (_, r) in enumerate(df.iterrows(), start=1):
             c = pl_color(r['Realized_PL'])
-            cards.append(card_html(
-                title=f"{i}. {r['Stock']}", badge=r['Type'], right=money(r['Realized_PL']), right_color=c,
-                items=[("Avg cost", money(r['Avg_Cost']), None), ("CMP", money(r['CMP']), None)]))
-        cards.append(card_html(title="Total Realized_PL", right=money(total), right_color=ink,
-                               total=True, bg=tint))
-        render_cards(cards)
+            st.button(f"{i}.  {r['Stock']}", key=f"plb_{kind}_{r['Type']}_{i}_{r['Stock']}", type="tertiary",
+                      on_click=go_to_stock, args=(stock_label(r['Type'], r['Stock'], False),))
+            render_cards([card_html(
+                badge=r['Type'], right=money(r['Realized_PL']), right_color=c,
+                items=[("Avg cost", money(r['Avg_Cost']), None), ("CMP", money(r['CMP']), None)])])
+        render_cards([card_html(title="Total Realized_PL", right=money(total), right_color=ink,
+                                total=True, bg=tint)])
         return
+    for ptype in sorted(df['Type'].unique()):   # clickable stock names open the Individual Stock page
+        stock_link_pills(ptype, df.loc[df['Type'] == ptype, 'Stock'].tolist(), f"plb_open_{kind}_{ptype}",
+                         closed=df.loc[df['Type'] == ptype, 'Stock'].tolist())
     rows = []
     for i, (_, r) in enumerate(df.iterrows(), start=1):
         rows.append([
-            (i, None), (r['Type'], None), (r['Stock'], None),
+            (i, None), (r['Type'], None), (("LINK", f"plb_open_{kind}_{r['Type']}", r['Stock']), None),
             (money(r['Avg_Cost']), None), (money(r['Total_Cost']), None), (money(r['CMP']), None),
             (money(r['Total_Value']), None), (money(r['Unrealized_PL']), None),
             (money(r['Realized_PL']), pl_color(r['Realized_PL'])), (money(r['Total_Net_Gain']), None),
@@ -2205,6 +2211,21 @@ def render_journal():
         f_type = st.segmented_control("Type", ["All", "CORE", "SATELLITE"], default="All", key="jr_type")
     stocks = sorted(jdf['Company Name'].unique())
     f_stock = st.selectbox("Stock", ["All stocks"] + stocks, key="jr_stock")
+    f_pos = None
+    if f_stock != "All stocks":
+        # a stock can be bought, sold out and bought again: each round is its own position
+        _ps = jdf[jdf['Company Name'] == f_stock]
+        if f_type in ("CORE", "SATELLITE"):
+            _ps = _ps[_ps['Type'] == f_type]
+        _opts = {}
+        for _pn, _g in _ps.groupby('Position No.'):
+            _st = "open" if (_g['Status'] == 'Open').any() else "closed"
+            _opts[f"Position #{_pn} · {_g['Type'].iloc[0].title()} · started {pd.Timestamp(_g['Date'].min()).strftime('%d-%b-%y')} · {_st}"] = _pn
+        _labels = ["All positions"] + sorted(_opts, key=lambda k: -_opts[k])
+        _pick = st.selectbox("Position", _labels, key=f"jr_pos_{f_stock}",
+                             help="Pick one buy-to-sell round of this stock to see only its tranches.")
+        if _pick != "All positions":
+            f_pos = _opts[_pick]
     v = jdf
     if f_status in ("Open", "Closed"):
         v = v[v['Status'] == f_status]
@@ -2212,6 +2233,8 @@ def render_journal():
         v = v[v['Type'] == f_type]
     if f_stock != "All stocks":
         v = v[v['Company Name'] == f_stock]
+    if f_pos is not None:
+        v = v[v['Position No.'] == f_pos]
     v = v.sort_values(['Position No.', 'Tranche No.', 'Status'], ascending=[False, True, True], kind='stable')
 
     st.download_button("⬇️ Download Journal (Excel)", journal_excel(jdf, sm),
@@ -2761,16 +2784,16 @@ elif page == "Weekly Unrealized P/L":
                 pick = st.selectbox("Friday", [ _lbl(f) for f in all_f ], index=0)
                 f_sel = next(f for f in all_f if _lbl(f) == pick)
                 day = wk[wk['friday'] == f_sel]
-                cards = []
                 for ptype in ("SATELLITE", "CORE"):
                     for _, r in day[day['type'] == ptype].sort_values('stock').iterrows():
-                        cards.append(card_html(title=r['stock'], badge=ptype.title(), right=money(r['unrealized']),
-                                               right_color=pl_color(r['unrealized']),
-                                               items=[("Units", f"{r['units']:,.0f}", None), ("Cost", money(r['cost']), None),
-                                                      ("Close", money(r['close']), None)]))
-                cards.append(card_html(title="Total", right=money(float(tot_by_f[f_sel])),
-                                       right_color=pl_color(float(tot_by_f[f_sel])), total=True, items=[]))
-                render_cards(cards)
+                        st.button(r['stock'], key=f"wkb_{ptype}_{r['stock']}", type="tertiary",
+                                  on_click=go_to_stock, args=(stock_label(ptype, r['stock']),))
+                        render_cards([card_html(badge=ptype.title(), right=money(r['unrealized']),
+                                                right_color=pl_color(r['unrealized']),
+                                                items=[("Units", f"{r['units']:,.0f}", None), ("Cost", money(r['cost']), None),
+                                                       ("Close", money(r['close']), None)])])
+                render_cards([card_html(title="Total", right=money(float(tot_by_f[f_sel])),
+                                        right_color=pl_color(float(tot_by_f[f_sel])), total=True, items=[])])
             else:
                 hdr = ['#', 'Stock'] + [_lbl(f) for f in shown]
                 for ptype, ttl in (("SATELLITE", "🚀 Satellite Holdings"), ("CORE", "🎯 Core Holdings")):
@@ -2780,9 +2803,10 @@ elif page == "Weekly Unrealized P/L":
                     st.markdown(f"#### {ttl}")
                     piv = sub.pivot_table(index='stock', columns='friday', values='unrealized', aggfunc='sum')
                     order = sorted(piv.index)
+                    stock_link_pills(ptype, order, f"wk_open_{ptype}")
                     trs = []
                     for i, stk in enumerate(order, start=1):
-                        cells = [(i, None), (stk, None)]
+                        cells = [(i, None), (("LINK", f"wk_open_{ptype}", stk), None)]
                         for f in shown:
                             v = piv.loc[stk].get(f, float('nan'))
                             cells.append(("–", None) if pd.isna(v) else (money(v, 0), pl_color(v)))
