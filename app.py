@@ -2847,7 +2847,7 @@ elif page == "Weekly Unrealized P/L":
                         fi = all_f.index(f)
                         return all_f[fi + 1] if fi + 1 < len(all_f) else None
                     def _fall_alert(series):
-                        """>15% fall (on any later Friday) from the highest unrealized P/L among the shown Fridays."""
+                        """Deepest fall (15% or more) on any later Friday from the highest unrealized P/L among the shown Fridays."""
                         ser = series.reindex(sorted(shown)).dropna()          # oldest -> newest
                         if ser.empty or ser.max() <= 0:
                             return ("N/A", None)
@@ -2856,8 +2856,8 @@ elif page == "Weekly Unrealized P/L":
                         if later.empty:
                             return ("N/A", None)
                         worst = float((peak - later.min()) / peak * 100)
-                        if worst > 15:
-                            return (("WRAP", f"▼ 15% fall from {_lbl(peak_d)} highest value"), "#B71C1C")
+                        if worst >= 15:
+                            return (("WRAP", f"▼ {worst:.1f}% fall from {_lbl(peak_d)} highest value"), "#B71C1C")
                         return ("N/A", None)
                     trs = []
                     for i, stk in enumerate(order, start=1):
