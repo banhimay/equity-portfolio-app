@@ -728,7 +728,7 @@ def fmt_num(v, decimals=2):
     s = f"{v:,.{decimals}f}"
     return s.rstrip('0').rstrip('.') if decimals > 0 and '.' in s else s
 
-def render_compact_table(headers, rows, left_cols=(), auto_width=False, total_last=False, font_px=12, fit=False, shrink=False):
+def render_compact_table(headers, rows, left_cols=(), auto_width=False, total_last=False, font_px=12, fit=False, shrink=False, tot_rows=0):
     """Small-font HTML table that fits in one view. rows = list of lists of
     (text, css_color_or_None). total_last=True styles the last row as a total row.
     Works in light and dark themes."""
@@ -768,7 +768,7 @@ def render_compact_table(headers, rows, left_cols=(), auto_width=False, total_la
             else:
                 inner = html_lib.escape(str(text))
             tds += f"<td{cls}{style}>{inner}</td>"
-        tr_cls = " class='tot'" if (total_last and ri == len(rows) - 1) else ""
+        tr_cls = " class='tot'" if ((total_last and ri == len(rows) - 1) or (tot_rows and ri >= len(rows) - tot_rows)) else ""
         body += f"<tr{tr_cls}>{tds}</tr>"
     st.markdown(
         f"{css}<div class='cmp-wrap'><table class='cmp{" fit" if fit else ""}' style='{width}font-size:{font_px}px;'>"
@@ -2802,21 +2802,41 @@ elif page == "Weekly Unrealized P/L":
                         continue
                     st.markdown(f"#### {ttl}")
                     piv = sub.pivot_table(index='stock', columns='friday', values='unrealized', aggfunc='sum')
+                    piv_all = wk[wk['type'] == ptype].pivot_table(index='stock', columns='friday', values='unrealized', aggfunc='sum')
                     order = sorted(piv.index)
                     stock_link_pills(ptype, order, f"wk_open_{ptype}")
+                    def _pct_cell(cur, prev):
+                        """% growth / fall of unrealized P/L vs the previous Friday (sign = direction of the move)."""
+                        if pd.isna(cur) or pd.isna(prev) or abs(prev) < 0.005:
+                            return ("–", None)
+                        pc = (cur - prev) / abs(prev) * 100
+                        return (f"{'▲' if pc > 0 else '▼' if pc < 0 else ''} {pc:+.1f}%".strip(), pl_color(pc))
+                    def _prev_f(f):
+                        fi = all_f.index(f)
+                        return all_f[fi + 1] if fi + 1 < len(all_f) else None
                     trs = []
                     for i, stk in enumerate(order, start=1):
                         cells = [(i, None), (("LINK", f"wk_open_{ptype}", stk), None)]
+                        pcts = [("", None), ("", None)]
                         for f in shown:
                             v = piv.loc[stk].get(f, float('nan'))
                             cells.append(("–", None) if pd.isna(v) else (money(v, 0), pl_color(v)))
+                            pf = _prev_f(f)
+                            pv = piv_all.loc[stk].get(pf, float('nan')) if (pf is not None and stk in piv_all.index) else float('nan')
+                            pcts.append(_pct_cell(v, pv))
                         trs.append(cells)
+                        trs.append(pcts)
                     tots = [("", None), ("Total", None)]
+                    tot_pcts = [("", None), ("", None)]
+                    _tp = wk[wk['type'] == ptype].groupby('friday')['unrealized'].sum()
                     for f in shown:
                         tv = float(sub[sub['friday'] == f]['unrealized'].sum()) if (sub['friday'] == f).any() else float('nan')
                         tots.append(("–", None) if pd.isna(tv) else (money(tv, 0), pl_color(tv)))
+                        pf = _prev_f(f)
+                        tot_pcts.append(_pct_cell(tv, float(_tp[pf]) if (pf is not None and pf in _tp.index) else float('nan')))
                     trs.append(tots)
-                    render_compact_table(hdr, trs, left_cols=(1,), total_last=True, font_px=12, fit=True, shrink=True)
+                    trs.append(tot_pcts)
+                    render_compact_table(hdr, trs, left_cols=(1,), tot_rows=2, font_px=12, fit=True, shrink=True)
                 st.markdown("#### 📊 All holdings")
                 tr1 = [("", None), ("Unrealized P/L", None)]
                 tr2 = [("", None), ("Change vs previous Friday", None)]
