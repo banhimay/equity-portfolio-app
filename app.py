@@ -773,6 +773,10 @@ def render_compact_table(headers, rows, left_cols=(), auto_width=False, total_la
                               f"style='text-decoration:none;font-size:10px;font-weight:700;padding:0 4px;border-radius:8px;"
                               f"border:1px solid rgba(128,128,128,0.6);{'background:rgba(46,125,50,0.25);' if _on else ''}'>"
                               f"{'−%' if _on else '+%'}</a>")
+            elif isinstance(text, tuple) and text and text[0] == "WRAP":     # ("WRAP", text): narrow fixed-width cell, text wraps
+                inner = html_lib.escape(str(text[1]))
+                style = (style[:-1] if style else " style='") + ";white-space:normal;width:118px;min-width:118px;max-width:118px;" \
+                        "font-size:11px;line-height:1.15;'"
             else:
                 inner = html_lib.escape(str(text))
             tds += f"<td{cls}{style}>{inner}</td>"
@@ -2842,6 +2846,19 @@ elif page == "Weekly Unrealized P/L":
                     def _prev_f(f):
                         fi = all_f.index(f)
                         return all_f[fi + 1] if fi + 1 < len(all_f) else None
+                    def _fall_alert(series):
+                        """>15% fall (on any later Friday) from the highest unrealized P/L among the shown Fridays."""
+                        ser = series.reindex(sorted(shown)).dropna()          # oldest -> newest
+                        if ser.empty or ser.max() <= 0:
+                            return ("N/A", None)
+                        peak_d, peak = ser.idxmax(), float(ser.max())
+                        later = ser[ser.index > peak_d]
+                        if later.empty:
+                            return ("N/A", None)
+                        worst = float((peak - later.min()) / peak * 100)
+                        if worst > 15:
+                            return (("WRAP", f"▼ 15% fall from {_lbl(peak_d)} highest value"), "#B71C1C")
+                        return ("N/A", None)
                     trs = []
                     for i, stk in enumerate(order, start=1):
                         _on = show_all or f"{ptype}|{stk}" in _sel
@@ -2853,6 +2870,8 @@ elif page == "Weekly Unrealized P/L":
                             pf = _prev_f(f)
                             pv = piv_all.loc[stk].get(pf, float('nan')) if (pf is not None and stk in piv_all.index) else float('nan')
                             pcts.append(_pct_cell(v, pv))
+                        cells.append(_fall_alert(piv.loc[stk]))
+                        pcts.append(("", None))
                         trs.append(cells)
                         if _on:
                             trs.append(pcts)
@@ -2864,10 +2883,12 @@ elif page == "Weekly Unrealized P/L":
                         tots.append(("–", None) if pd.isna(tv) else (money(tv, 0), pl_color(tv)))
                         pf = _prev_f(f)
                         tot_pcts.append(_pct_cell(tv, float(_tp[pf]) if (pf is not None and pf in _tp.index) else float('nan')))
+                    tots.append(("", None)); tot_pcts.append(("", None))
                     trs.append(tots)
                     if show_all:
                         trs.append(tot_pcts)
-                    render_compact_table(hdr, trs, left_cols=(1,), tot_rows=2 if show_all else 1, font_px=12, fit=True, shrink=True)
+                    render_compact_table(hdr + ['Alert'], trs, left_cols=(1, 2 + len(shown)), tot_rows=2 if show_all else 1,
+                                         font_px=12, fit=True, shrink=True)
                 st.markdown("#### 📊 All holdings")
                 tr1 = [("", None), ("Unrealized P/L", None)]
                 tr2 = [("", None), ("Change vs previous Friday", None)]
