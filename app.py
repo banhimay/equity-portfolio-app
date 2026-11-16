@@ -2820,16 +2820,26 @@ elif page == "Weekly Unrealized P/L":
                 st.markdown("#### 📊 All holdings")
                 tr1 = [("", None), ("Unrealized P/L", None)]
                 tr2 = [("", None), ("Change vs previous Friday", None)]
+                tr3 = [("", None), ("% growth / fall vs previous Friday", None)]
                 for f in shown:
                     tv = float(tot_by_f[f])
                     tr1.append((money(tv, 0), pl_color(tv)))
                     fi = all_f.index(f)
                     if fi + 1 < len(all_f):
-                        dv = tv - float(tot_by_f[all_f[fi + 1]])
+                        pv = float(tot_by_f[all_f[fi + 1]])
+                        dv = tv - pv
                         tr2.append((money(dv, 0), pl_color(dv)))
+                        if abs(pv) > 0.005:
+                            pc = dv / abs(pv) * 100          # % of last week's unrealized P/L (sign = direction of the move)
+                            tr3.append((f"{'▲' if pc > 0 else '▼' if pc < 0 else ''} {pc:+.1f}%".strip(), pl_color(pc)))
+                        else:
+                            tr3.append(("–", None))
                     else:
                         tr2.append(("–", None))
-                render_compact_table(hdr, [tr1, tr2], left_cols=(1,), font_px=12, fit=True, shrink=True)
+                        tr3.append(("–", None))
+                render_compact_table(hdr, [tr1, tr2, tr3], left_cols=(1,), font_px=12, fit=True, shrink=True)
+                st.caption("% growth / fall = this Friday's change ÷ the previous Friday's unrealized P/L (green ▲ = grew, red ▼ = fell). "
+                           "Shown as – when the previous week's total was nil.")
         with st.expander("⚙️ Manage snapshots"):
             st.caption("Snapshots are taken automatically for each completed Friday. Use these only to repair or extend history.")
             c1, c2 = st.columns(2)
