@@ -762,9 +762,17 @@ def render_compact_table(headers, rows, left_cols=(), auto_width=False, total_la
                 style = f" style='background:{bg}; color:{color or '#000'}; font-weight:700;'"
             else:
                 style = f" style='color:{color}; font-weight:600;'" if color else ""
-            if isinstance(text, tuple) and text and text[0] == "LINK":   # ("LINK", pill_key, stock)
+            if isinstance(text, tuple) and text and text[0] == "LINK":   # ("LINK", pill_key, stock[, toggle_key, is_on])
                 inner = (f"<a href='#' class='stk-link' data-pill='{html_lib.escape(str(text[1]), quote=True)}' "
                          f"data-stock='{html_lib.escape(str(text[2]), quote=True)}'>{html_lib.escape(str(text[2]))}</a>")
+                if len(text) >= 5:   # small clickable "+% / −%" chip right next to the name
+                    _on = bool(text[4])
+                    inner += (f" <a href='#' class='stk-link' data-pill='{html_lib.escape(str(text[3]), quote=True)}' "
+                              f"data-stock='{html_lib.escape(str(text[2]), quote=True)}' "
+                              f"title='{'Hide' if _on else 'Show'} % change vs previous Friday' "
+                              f"style='text-decoration:none;font-size:10px;font-weight:700;padding:0 4px;border-radius:8px;"
+                              f"border:1px solid rgba(128,128,128,0.6);{'background:rgba(46,125,50,0.25);' if _on else ''}'>"
+                              f"{'−%' if _on else '+%'}</a>")
             else:
                 inner = html_lib.escape(str(text))
             tds += f"<td{cls}{style}>{inner}</td>"
@@ -1566,6 +1574,22 @@ def stock_link_pills(ptype, stocks, key, closed=()):
     # the chips stay in the page (hidden); the stock names inside the tables click them
     with st.container(key=f"hp_{key}"):
         st.pills("🔍 Open a stock's analysis", list(stocks), selection_mode="single", key=key, on_change=_open)
+    _link_listener()
+
+def stock_toggle_pills(stocks, key, state_key, ptype):
+    """Hidden chips behind the small '+% / −%' marker next to a stock name: each click adds / removes the stock
+    from the set kept in session_state[state_key]."""
+    if not stocks:
+        return
+    def _flip():
+        picked = st.session_state.get(key)
+        st.session_state[key] = None
+        if picked:
+            cur = set(st.session_state.get(state_key, []))
+            cur.symmetric_difference_update({f"{ptype}|{picked}"})
+            st.session_state[state_key] = sorted(cur)
+    with st.container(key=f"hp_{key}"):
+        st.pills("Show % change", list(stocks), selection_mode="single", key=key, on_change=_flip)
     _link_listener()
 
 def render_holdings_grid(df, ptype):
@@ -2796,6 +2820,9 @@ elif page == "Weekly Unrealized P/L":
                                         right_color=pl_color(float(tot_by_f[f_sel])), total=True, items=[])])
             else:
                 hdr = ['#', 'Stock'] + [_lbl(f) for f in shown]
+                _sel = set(st.session_state.get("wk_pct_sel", []))
+                show_all = st.toggle("Show % growth / fall vs previous Friday for all stocks", value=False, key="wk_show_pct")
+                st.caption("Or click the small **+%** next to a stock's name to show its % change row (click **−%** to hide it again).")
                 for ptype, ttl in (("SATELLITE", "🚀 Satellite Holdings"), ("CORE", "🎯 Core Holdings")):
                     sub = wk[(wk['type'] == ptype) & (wk['friday'].isin(shown))]
                     if sub.empty:
@@ -2805,6 +2832,7 @@ elif page == "Weekly Unrealized P/L":
                     piv_all = wk[wk['type'] == ptype].pivot_table(index='stock', columns='friday', values='unrealized', aggfunc='sum')
                     order = sorted(piv.index)
                     stock_link_pills(ptype, order, f"wk_open_{ptype}")
+                    stock_toggle_pills(order, f"wk_pct_{ptype}", "wk_pct_sel", ptype)
                     def _pct_cell(cur, prev):
                         """% growth / fall of unrealized P/L vs the previous Friday (sign = direction of the move)."""
                         if pd.isna(cur) or pd.isna(prev) or abs(prev) < 0.005:
@@ -2816,7 +2844,8 @@ elif page == "Weekly Unrealized P/L":
                         return all_f[fi + 1] if fi + 1 < len(all_f) else None
                     trs = []
                     for i, stk in enumerate(order, start=1):
-                        cells = [(i, None), (("LINK", f"wk_open_{ptype}", stk), None)]
+                        _on = show_all or f"{ptype}|{stk}" in _sel
+                        cells = [(i, None), (("LINK", f"wk_open_{ptype}", stk, f"wk_pct_{ptype}", _on), None)]
                         pcts = [("", None), ("", None)]
                         for f in shown:
                             v = piv.loc[stk].get(f, float('nan'))
@@ -2825,7 +2854,8 @@ elif page == "Weekly Unrealized P/L":
                             pv = piv_all.loc[stk].get(pf, float('nan')) if (pf is not None and stk in piv_all.index) else float('nan')
                             pcts.append(_pct_cell(v, pv))
                         trs.append(cells)
-                        trs.append(pcts)
+                        if _on:
+                            trs.append(pcts)
                     tots = [("", None), ("Total", None)]
                     tot_pcts = [("", None), ("", None)]
                     _tp = wk[wk['type'] == ptype].groupby('friday')['unrealized'].sum()
@@ -2835,8 +2865,9 @@ elif page == "Weekly Unrealized P/L":
                         pf = _prev_f(f)
                         tot_pcts.append(_pct_cell(tv, float(_tp[pf]) if (pf is not None and pf in _tp.index) else float('nan')))
                     trs.append(tots)
-                    trs.append(tot_pcts)
-                    render_compact_table(hdr, trs, left_cols=(1,), tot_rows=2, font_px=12, fit=True, shrink=True)
+                    if show_all:
+                        trs.append(tot_pcts)
+                    render_compact_table(hdr, trs, left_cols=(1,), tot_rows=2 if show_all else 1, font_px=12, fit=True, shrink=True)
                 st.markdown("#### 📊 All holdings")
                 tr1 = [("", None), ("Unrealized P/L", None)]
                 tr2 = [("", None), ("Change vs previous Friday", None)]
