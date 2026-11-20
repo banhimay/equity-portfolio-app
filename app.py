@@ -532,14 +532,14 @@ def compute_portfolio(df, overrides_df, cash_base=None):
 
     portfolio = pd.DataFrame(rows)
     if not portfolio.empty:
-        # Allocation_% = what is tied up in this stock (Total_Cost) as a share of the capital base:
+        # IC(%) = what is tied up in this stock (Total_Cost) as a share of the capital base:
         # all shares held at cost + cash in the broker accounts (cash derived from deposits, transfers, trades and charges)
         capital_base = (float(portfolio['Total_Cost'].sum()) + cash_base) if cash_base is not None else 0.0
         if capital_base > 0:
-            portfolio['Allocation_%'] = portfolio['Total_Cost'] / capital_base
+            portfolio['IC(%)'] = portfolio['Total_Cost'] / capital_base
         else:   # no cash-flow data available: fall back to share of current portfolio value
             total_portfolio_val = portfolio['Total_Value'].sum()
-            portfolio['Allocation_%'] = portfolio['Total_Value'] / total_portfolio_val if total_portfolio_val > 0 else 0.0
+            portfolio['IC(%)'] = portfolio['Total_Value'] / total_portfolio_val if total_portfolio_val > 0 else 0.0
 
     return portfolio, df
 
@@ -903,7 +903,7 @@ def render_tranche_pyramids(tranche_df, stock, ptype, cap_base=None, ic_pct=None
     out.append(f"<text x='{cx_i}' y='25' text-anchor='middle' fill='currentColor' font-size='16' font-weight='700'>Ideal pyramid</text>")
     # actual
     tot = sum(inv) or 1.0
-    cap = cap_base if (cap_base and cap_base > 0) else PYRAMID_CAPITAL   # capital base of the dashboard's Allocation_% / IC%
+    cap = cap_base if (cap_base and cap_base > 0) else PYRAMID_CAPITAL   # capital base of the dashboard's IC(%) / IC%
     widths = [max(min(a / (PYRAMID_CAPITAL * IDEAL_PYRAMID[0][1] / 100), 1.0), 0.45) * W0 for a in inv]
     for i in range(n_act):
         y1, y0 = ybot - i * BAND, ybot - (i + 1) * BAND + GAP
@@ -1252,7 +1252,7 @@ def audit_cash_total():
         return 0.0
 
 def audit_cash_base():
-    """Cash used in the Audit IC/CC percentages: the derived cash (same base as the Dashboard Allocation_%)."""
+    """Cash used in the Audit IC/CC percentages: the derived cash (same base as the Dashboard IC(%))."""
     c = derived_cash_total()
     return 0.0 if c is None else c
 
@@ -1589,7 +1589,7 @@ st.markdown("---")
 FORMAT_DICT = {
     'Avg_Cost': '₹{:.2f}', 'Total_Cost': '₹{:.2f}', 'CMP': '₹{:.2f}',
     'Total_Value': '₹{:.2f}', 'Unrealized_PL': '₹{:.2f}',
-    'Realized_PL': '₹{:.2f}', 'Total_Net_Gain': '₹{:.2f}', 'Allocation_%': '{:.1%}',
+    'Realized_PL': '₹{:.2f}', 'Total_Net_Gain': '₹{:.2f}', 'IC(%)': '{:.1%}',
     'Yest_Close': '₹{:.2f}', 'Day_Change': '₹{:.2f}'
 }
 
@@ -1677,17 +1677,17 @@ def render_holdings_grid(df, ptype):
                 ("Avg", money(r['Avg_Cost']), None), ("Invested", money(r['Total_Cost']), None),
                 ("Value", money(r['Total_Value']), None), ("Unrealized", money(r['Unrealized_PL']), pl_color(r['Unrealized_PL'])),
                 ("Realized", money(r['Realized_PL']), None), ("Net gain", money(r['Total_Net_Gain']), None),
-                ("Alloc", f"{r['Allocation_%']:.1%}", None),
+                ("IC(%)", f"{r['IC(%)']:.1%}", None),
             ])])
         render_cards([card_html(title="Total", right=money(df['Total_Value'].sum()), total=True,
                                 items=[("Total value", money(df['Total_Value'].sum()), None),
-                                       ("Allocation", f"{df['Allocation_%'].sum():.1%}", None)])])
-        st.caption("Allocation_% = Total_Cost ÷ (all shares held at cost + cash in the broker accounts).")
+                                       ("IC(%)", f"{df['IC(%)'].sum():.1%}", None)])])
+        st.caption("IC(%) = Total_Cost ÷ (all shares held at cost + cash in the broker accounts).")
         return
 
     stock_link_pills(ptype, df['Stock'].tolist(), f"open_stock_{ptype}")
     render_overview_open("", df, heading=False, sum_value_alloc=True, fit=True, ptype=ptype)
-    st.caption("**Allocation_%** = Total_Cost ÷ (all shares held at cost + cash), where cash = Deposits − Transferred Back − purchases "
+    st.caption("**IC(%)** = Total_Cost ÷ (all shares held at cost + cash), where cash = Deposits − Transferred Back − purchases "
                "+ sale proceeds − charges (worked out from your records, both accounts).  "
                "**Return_%** = Unrealized_PL ÷ Total_Cost.  "
                "Shading of Unrealized_PL to Total_Net_Gain follows Return_%: negative = light red, 0–25% = light blue, above 25% = green.")
@@ -1724,7 +1724,7 @@ def render_overview_open(title, df, heading=True, sum_value_alloc=False, link_ty
                    ("Yest", money(r['Yest_Close']), None), ("1 Day", money(r['Day_Change']), pl_color(r['Day_Change'])),
                    ("Invested", money(r['Total_Cost']), None), ("Value", money(r['Total_Value']), None),
                    ("Unrealized", money(r['Unrealized_PL']), None), ("Realized", money(r['Realized_PL']), None),
-                   ("Net gain", money(r['Total_Net_Gain']), None), ("Alloc", f"{r['Allocation_%']:.1%}", None)]))
+                   ("Net gain", money(r['Total_Net_Gain']), None), ("IC(%)", f"{r['IC(%)']:.1%}", None)]))
         # Return_% = Unrealized_PL / Total_Cost; it shades Unrealized_PL..Total_Net_Gain:
         # negative = light red, 0-25% = light blue, above 25% = green
         ret = (r['Unrealized_PL'] / r['Total_Cost']) if r['Total_Cost'] else 0.0
@@ -1736,15 +1736,15 @@ def render_overview_open(title, df, heading=True, sum_value_alloc=False, link_ty
             (money(r['Day_Change']), pl_color(r['Day_Change'])),
             (money(r['Total_Value']), None), (money(r['Unrealized_PL']), "#111", shade),
             (money(r['Realized_PL']), "#111", shade), (money(r['Total_Net_Gain']), "#111", shade),
-            (f"{r['Allocation_%']:.1%}", None), (f"{ret:.1%}", None),
+            (f"{r['IC(%)']:.1%}", None), (f"{ret:.1%}", None),
             ("—" if (tc := tranche_count(ptype or link_type or r.get('Type'), r['Stock'], r['CMP'])) is None else tc, None),
         ])
     tot = day_change_total(df)
-    val_sum, alloc_sum, cost_sum = df['Total_Value'].sum(), df['Allocation_%'].sum(), df['Total_Cost'].sum()
+    val_sum, alloc_sum, cost_sum = df['Total_Value'].sum(), df['IC(%)'].sum(), df['Total_Cost'].sum()
     unreal_sum = df['Unrealized_PL'].sum()
     if IS_MOBILE:
         extra = [("Total invested", money(cost_sum), None), ("Total value", money(val_sum), None),
-                 ("Unrealized", money(unreal_sum), pl_color(unreal_sum)), ("Allocation", f"{alloc_sum:.1%}", None)]
+                 ("Unrealized", money(unreal_sum), pl_color(unreal_sum)), ("IC(%)", f"{alloc_sum:.1%}", None)]
         total_card = card_html(title="Total 1_Day_Change", right=money(tot), right_color=pl_color(tot),
                                items=extra, total=True)
         if link_type:
@@ -1762,7 +1762,7 @@ def render_overview_open(title, df, heading=True, sum_value_alloc=False, link_ty
                  (money(tot), pl_color(tot))] + tail)
     render_compact_table(
         ['#', 'Stock', 'Units', 'Avg_Cost', 'Total_Cost', 'CMP', 'Yest_Close', '1_Day_Change',
-         'Total_Value', 'Unrealized_PL', 'Realized_PL', 'Total_Net_Gain', 'Allocation_%', 'Return_%', 'Tranche'],
+         'Total_Value', 'Unrealized_PL', 'Realized_PL', 'Total_Net_Gain', 'IC(%)', 'Return_%', 'Tranche'],
         rows, left_cols=(1,), total_last=True, font_px=12 if (link_type or fit) else 13, fit=bool(link_type) or fit,
         shrink=bool(link_type)
     )
@@ -2128,7 +2128,7 @@ def build_journal(trades):
                 irisk = per_share_risk * qty if pd.notna(per_share_risk) else float('nan')
                 r = dict(base)
                 r.update({'Buy Charges': qty * lot['bchg_u'], 'No. of Shares': qty, 'Amount Deployed': dep,
-                          'Allocation %': dep / bal if bal and pd.notna(bal) else float('nan'),
+                          'IC(%)': dep / bal if bal and pd.notna(bal) else float('nan'),
                           'Initial Risk': irisk,
                           '% Of Account Risked': irisk / bal if bal and pd.notna(bal) and pd.notna(irisk) else float('nan')})
                 r.update(kw)
@@ -2361,7 +2361,7 @@ def render_next_tranche_planner(sel_type, sel_stock, lots, cmp_price, ic_base):
         pass
 
 JOURNAL_COLS = ['Date', 'Long/Short', 'Type', 'Company Name', 'Position No.', 'Tranche No.', 'Entry Price',
-                'Account Balance', 'No. of Shares', 'Amount Deployed', 'Allocation %', 'Initial SL Price', 'Initial Risk',
+                'Account Balance', 'No. of Shares', 'Amount Deployed', 'IC(%)', 'Initial SL Price', 'Initial Risk',
                 'Current SL Price', 'Residual Risk', '1R Price', 'Actual Exit Price', 'Exit Date', '% Of Account Risked',
                 'Closed Position P/L', 'Unrealized P/L', 'Account Change %', 'Status', 'R Factor', 'Duration (Days)',
                 'Buy Charges', 'Sell Charges', 'Net P/L']
@@ -2397,7 +2397,7 @@ def journal_excel(jdf, summary):
         c.font = Font(bold=True, color="FFFFFF")
         c.fill = fill
         c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-    fmts = {'Date': 'dd-mmm-yy', 'Exit Date': 'dd-mmm-yy', 'Allocation %': '0.0%', '% Of Account Risked': '0.00%',
+    fmts = {'Date': 'dd-mmm-yy', 'Exit Date': 'dd-mmm-yy', 'IC(%)': '0.0%', '% Of Account Risked': '0.00%',
             'Account Change %': '0.00%', 'R Factor': '0.00"x";-0.00"x"', 'No. of Shares': '#,##0',
             'Position No.': '0', 'Tranche No.': '0', 'Duration (Days)': '0'}
     green, red = Font(color="1B8A3A"), Font(color="C62828")
@@ -2580,7 +2580,7 @@ def render_journal():
         rows.append([
             (r['Position No.'], None), (r['Tranche No.'], None), (d8(r['Date']), None), (r['Type'][:4], None),
             (r['Company Name'], None), (money(r['Entry Price']), None), (f"{r['No. of Shares']:,.0f}", None),
-            (money(r['Amount Deployed'], 0), None), (pct(r['Allocation %']), None),
+            (money(r['Amount Deployed'], 0), None), (pct(r['IC(%)']), None),
             (money(r['Initial SL Price']), None), (money(r['Initial Risk'], 0), None),
             (money(r['Current SL Price']), None), (money(rr, 0) if is_open else "-", pl_color(-rr) if is_open and pd.notna(rr) else None),
             (money(r['1R Price']), None), (money(r['Actual Exit Price']), None), (d8(r['Exit Date']), None),
@@ -2593,7 +2593,7 @@ def render_journal():
             (r['Status'], "#1F4E78" if is_open else None), (rx(r['R Factor']), pl_color(r['R Factor'])),
             (r['Duration (Days)'], None),
         ])
-    render_compact_table(['Pos', 'T', 'Date', 'Type', 'Stock', 'Entry', 'Shares', 'Deployed', 'Alloc_%', 'Initial_SL',
+    render_compact_table(['Pos', 'T', 'Date', 'Type', 'Stock', 'Entry', 'Shares', 'Deployed', 'IC(%)', 'Initial_SL',
                           'Initial_Risk', 'Current_SL', 'Residual_Risk', '1R_Price', 'Exit_Price', 'Exit_Date',
                           '%_Acct_Risked', 'Closed_P/L', 'Unrealized_P/L', 'Buy_Chg', 'Sell_Chg', 'Net_P/L', 'Acct_Chg_%', 'Status', 'R', 'Days'],
                          rows, left_cols=(4,), font_px=12, fit=True, shrink=True)
@@ -3223,7 +3223,7 @@ elif page == "Core & Satellite Audit":
         st.caption("Start Date = first buy date of the lots still held (FIFO). HP = whole months held. "
                    "IC = Invested Value ÷ total invested (Core + Satellite + Cash). CC = Current Value ÷ total current value. "
                    "ROI = Current ÷ Invested − 1. Cash = derived from deposits − transfers back − purchases + sale proceeds − charges "
-                   "(the same base as Allocation_% on the dashboard).")
+                   "(the same base as IC(%) on the dashboard).")
 
 elif page == "FY P&L and Balance Sheet":
     st.subheader("🏦 Financial-year Profit/Loss & Balance Sheet")
