@@ -585,6 +585,40 @@ def derived_cash_by_account(ent):
         out[a] = round(dep - back - net_buys - chg, 2)
     return out
 
+# --- per-trade charges: contract-note totals are consolidated, so each stock gets its share ---
+# Delivery equity at Zerodha: no brokerage; STT 0.1% on buy and sell; exchange transaction charge, SEBI fee and 18% GST on those;
+# stamp duty 0.015% on the buy side only. Every one of these is a % of trade value, so a stock's share of a day's total is
+# exactly its share of the day's turnover. DP charge is a flat fee per stock sold per day (₹15.045 on the ledger), split by qty.
+CH_STT, CH_TXN, CH_SEBI, CH_STAMP, CH_GST, CH_DP = 0.001, 0.0000297, 0.000001, 0.00015, 0.18, 15.045
+
+def trade_charges(t):
+    """DataFrame (same index as t) with 'stat' (statutory) and 'dp' charge for every trade row. ₹0 (bonus/gift) rows carry none."""
+    q = t['Unit'].astype(float)
+    val = q.abs() * t['Price'].astype(float)
+    stat = val * (CH_STT + CH_TXN + CH_SEBI) + val * (CH_TXN + CH_SEBI) * CH_GST + val.where(q > 0, 0.0) * CH_STAMP
+    dp = pd.Series(0.0, index=t.index)
+    sells = t[(q < 0) & (val > 0)]
+    if len(sells):
+        acct = sells['Account'].fillna('') if 'Account' in sells.columns else pd.Series('', index=sells.index)
+        key = [acct, pd.to_datetime(sells['Date of Trxn']).dt.date, sells['Stock'].astype(str).str.strip().str.upper()]
+        qa = sells['Unit'].astype(float).abs()
+        dp.loc[sells.index] = CH_DP * qa / qa.groupby(key).transform('sum')
+    return pd.DataFrame({'stat': stat, 'dp': dp})
+
+def charges_recon(t, ent):
+    """Modelled charges per account and financial year next to what is booked on the Cash Flow tab."""
+    rows = []
+    tt = t.copy()
+    tt['Date of Trxn'] = pd.to_datetime(tt['Date of Trxn'])
+    c = trade_charges(tt)
+    tt['stat'], tt['dp'] = c['stat'], c['dp']
+    tt['fy'] = tt['Date of Trxn'].apply(lambda d: f"{d.year}-{str(d.year + 1)[2:]}" if d.month >= 4 else f"{d.year - 1}-{str(d.year)[2:]}")
+    for (a, fy), g in tt.groupby([tt['Account'].fillna('(no account)'), 'fy']):
+        e = ent[(ent['account'] == a) & (ent['label'] == fy)]
+        rows.append((a, fy, float(g['stat'].sum()), float(e.loc[e['kind'] == 'CHARGE', 'amount'].sum()),
+                     float(g['dp'].sum()), float(e.loc[e['kind'] == 'DP_CHARGE', 'amount'].sum())))
+    return rows
+
 def untagged_trade_count():
     if 'Account' not in trades_df.columns:
         return 0
@@ -1995,6 +2029,8 @@ def build_journal(trades):
     t['_T'] = t['TYPE'].astype(str).str.strip().str.upper()
     t['_S'] = t['Stock'].astype(str).str.strip().str.upper()
     t = t.sort_values('Date of Trxn', kind='stable')
+    _c = trade_charges(t)
+    t['_CH'] = _c['stat'] + _c['dp']
     cmp_map = {(r['Type'], r['Stock']): float(r['CMP']) for _, r in portfolio_df.iterrows()} if not portfolio_df.empty else {}
     today = pd.Timestamp(ist_now().date())
 
@@ -2007,9 +2043,11 @@ def build_journal(trades):
                 if pos is None or sum(l['rem'] for l in pos['lots']) <= 1e-9:
                     pos = {'type': pt, 'stock': stk, 'start': d, 'lots': []}
                     positions.append(pos)
-                pos['lots'].append({'date': d, 'price': p, 'qty': q, 'rem': q, 'exits': []})
+                pos['lots'].append({'date': d, 'price': p, 'qty': q, 'rem': q, 'exits': [],
+                                    'bchg_u': float(r['_CH']) / q, 'sell_chg': 0.0})
             elif q < 0 and pos is not None:
                 s = -q
+                s_chg_u = float(r['_CH']) / s
                 for lot in pos['lots']:
                     if s <= 1e-9:
                         break
@@ -2019,6 +2057,7 @@ def build_journal(trades):
                     lot['rem'] -= c
                     s -= c
                     lot['exits'].append((d, p, c))
+                    lot['sell_chg'] += c * s_chg_u
     positions.sort(key=lambda x: (x['start'], x['stock']))
 
     # realized P/L events (date, amount) -> account balance on a date includes P/L booked before it
@@ -2076,7 +2115,7 @@ def build_journal(trades):
                 dep = qty * entry
                 irisk = per_share_risk * qty if pd.notna(per_share_risk) else float('nan')
                 r = dict(base)
-                r.update({'No. of Shares': qty, 'Amount Deployed': dep,
+                r.update({'Buy Charges': qty * lot['bchg_u'], 'No. of Shares': qty, 'Amount Deployed': dep,
                           'Allocation %': dep / bal if bal and pd.notna(bal) else float('nan'),
                           'Initial Risk': irisk,
                           '% Of Account Risked': irisk / bal if bal and pd.notna(bal) and pd.notna(irisk) else float('nan')})
@@ -2092,6 +2131,7 @@ def build_journal(trades):
                 rows.append(part(sold, **{
                     'Current SL Price': float('nan'), 'Residual Risk': 0.0, 'Actual Exit Price': exit_px, 'Exit Date': exit_d,
                     'Closed Position P/L': pl, 'Unrealized P/L': float('nan'),
+                    'Sell Charges': lot['sell_chg'], 'Net P/L': pl - sold * lot['bchg_u'] - lot['sell_chg'],
                     'Account Change %': pl / bal if bal and pd.notna(bal) else float('nan'), 'Status': 'Closed',
                     'R Factor': pl / irisk if pd.notna(irisk) and irisk > 0 else float('nan'),
                     'Duration (Days)': int((exit_d - d).days)}))
@@ -2103,6 +2143,7 @@ def build_journal(trades):
                     'Current SL Price': cur_sl, 'Residual Risk': (entry - cur_sl) * q if pd.notna(cur_sl) else float('nan'),
                     'Actual Exit Price': float('nan'), 'Exit Date': pd.NaT,
                     'Closed Position P/L': float('nan'), 'Unrealized P/L': unreal,
+                    'Sell Charges': float('nan'), 'Net P/L': unreal - q * lot['bchg_u'] if pd.notna(unreal) else float('nan'),
                     'Account Change %': float('nan'), 'Status': 'Open',
                     'R Factor': unreal / irisk if pd.notna(irisk) and irisk > 0 and pd.notna(unreal) else float('nan'),
                     'Duration (Days)': int((today - d).days)}))
@@ -2129,7 +2170,8 @@ def build_journal(trades):
 JOURNAL_COLS = ['Date', 'Long/Short', 'Type', 'Company Name', 'Position No.', 'Tranche No.', 'Entry Price',
                 'Account Balance', 'No. of Shares', 'Amount Deployed', 'Allocation %', 'Initial SL Price', 'Initial Risk',
                 'Current SL Price', 'Residual Risk', '1R Price', 'Actual Exit Price', 'Exit Date', '% Of Account Risked',
-                'Closed Position P/L', 'Unrealized P/L', 'Account Change %', 'Status', 'R Factor', 'Duration (Days)']
+                'Closed Position P/L', 'Unrealized P/L', 'Account Change %', 'Status', 'R Factor', 'Duration (Days)',
+                'Buy Charges', 'Sell Charges', 'Net P/L']
 
 def journal_excel(jdf, summary):
     """Transaction_Log-style workbook: summary block on top, then the journal table."""
@@ -2176,7 +2218,7 @@ def journal_excel(jdf, summary):
             c = ws.cell(row=i, column=j, value=v)
             c.number_format = fmts.get(col, '#,##0.00;-#,##0.00')
             c.border = Border(bottom=thin)
-            if col in ('Closed Position P/L', 'Unrealized P/L', 'R Factor', 'Account Change %') and isinstance(v, (int, float)) and v != 0:
+            if col in ('Closed Position P/L', 'Unrealized P/L', 'R Factor', 'Account Change %', 'Net P/L') and isinstance(v, (int, float)) and v != 0:
                 c.font = green if v > 0 else red
             if col == 'Status':
                 c.font = Font(bold=True, color="1F4E78" if v == 'Open' else "666666")
@@ -2293,6 +2335,24 @@ def render_journal():
     st.caption(f"{len(v)} rows · newest position first · Initial SL from your ladder (T1 −10%, T2 same ₹ risk, "
                "T3 breakeven, T4+ your manual stop or breakeven if none saved) · R = P/L ÷ initial risk (open rows: unrealized) · "
                "₹0 buys (bonus) carry no risk")
+    st.caption("💸 Charges: each contract note's charges are one total for the day, so every stock gets its share of that day's turnover "
+               "(STT, exchange, SEBI, GST on both sides; stamp duty on buys only). The sale DP charge is a flat ₹15.045 per stock sold that day, "
+               "split by quantity. Buy_Chg / Sell_Chg are the charges on each tranche's shares; Net_P/L = P/L − buy − sell charges "
+               "(open rows: after buy charges only, sell charges follow when sold).")
+    try:
+        _ent, _ = load_cash() if DATABASE_URL else (None, None)
+        if _ent is not None:
+            with st.expander("🔎 Charges cross-check against the Cash Flow tab"):
+                _rr = [[(a, None), (fy, None), (money(ms), None), (money(bs), None),
+                        (money(ms - bs), "#C62828" if abs(ms - bs) >= 5 else "#1B8A3A"),
+                        (money(md), None), (money(bd), None)] for a, fy, ms, bs, md, bd in charges_recon(processed_trades, _ent)]
+                render_compact_table(['Account', 'FY', 'Statutory (modelled)', 'Booked', 'Diff', 'DP on sales (modelled)', 'DP booked'],
+                                     _rr, left_cols=(0, 1), auto_width=True, font_px=12)
+                st.caption("Statutory charges are modelled at the exchange rates, so they should match the contract notes to within a few rupees; "
+                           "a larger difference means a contract note is not booked yet. Booked DP is higher than DP on sales because it also holds "
+                           "yearly/enabling DP charges (AMC, DDPI) that belong to the account, not to a stock.")
+    except Exception:
+        pass
     if v.empty:
         st.caption("Nothing matches these filters.")
         return
@@ -2312,7 +2372,10 @@ def render_journal():
             else:
                 items += [("Exit", money(r['Actual Exit Price']), None), ("Exit date", d8(r['Exit Date']), None),
                           ("Acct change", pct(r['Account Change %'], 2), pl_color(r['Account Change %']))]
-            items += [("R factor", rx(r['R Factor']), pl_color(r['R Factor'])), ("Days", f"{r['Duration (Days)']}", None)]
+            items += [("R factor", rx(r['R Factor']), pl_color(r['R Factor'])), ("Days", f"{r['Duration (Days)']}", None),
+                      ("Buy charges", money(r['Buy Charges']), None),
+                      ("Sell charges", money(r['Sell Charges']) if not is_open else "-", None),
+                      ("Net P/L", money(r['Net P/L'], 0), pl_color(r['Net P/L']))]
             cards.append(card_html(title=f"#{r['Position No.']} {r['Company Name']} · T{r['Tranche No.']}",
                                    badge=f"{r['Type'][:4]} · {r['Status']}", right=money(plv, 0), right_color=pl_color(plv), items=items))
         render_cards(cards)
@@ -2331,13 +2394,15 @@ def render_journal():
             (pct(r['% Of Account Risked'], 2), None),
             (money(r['Closed Position P/L'], 0), pl_color(r['Closed Position P/L'])),
             (money(r['Unrealized P/L'], 0), pl_color(r['Unrealized P/L'])),
+            (money(r['Buy Charges']), None), (money(r['Sell Charges']) if not is_open else "-", None),
+            (money(r['Net P/L'], 0), pl_color(r['Net P/L'])),
             (pct(r['Account Change %'], 2), pl_color(r['Account Change %'])),
             (r['Status'], "#1F4E78" if is_open else None), (rx(r['R Factor']), pl_color(r['R Factor'])),
             (r['Duration (Days)'], None),
         ])
     render_compact_table(['Pos', 'T', 'Date', 'Type', 'Stock', 'Entry', 'Shares', 'Deployed', 'Alloc_%', 'Initial_SL',
                           'Initial_Risk', 'Current_SL', 'Residual_Risk', '1R_Price', 'Exit_Price', 'Exit_Date',
-                          '%_Acct_Risked', 'Closed_P/L', 'Unrealized_P/L', 'Acct_Chg_%', 'Status', 'R', 'Days'],
+                          '%_Acct_Risked', 'Closed_P/L', 'Unrealized_P/L', 'Buy_Chg', 'Sell_Chg', 'Net_P/L', 'Acct_Chg_%', 'Status', 'R', 'Days'],
                          rows, left_cols=(4,), font_px=12, fit=True, shrink=True)
 
 # ---- weekly Unrealized_PL snapshots: catch up once per session (Friday closes are fetched from price history) ----
@@ -2633,6 +2698,27 @@ elif page == "Individual Stock":
                  'Δ Prev', 'Δ CMP', 'SL Rule', 'SL ₹', 'Risk ₹', 'P/L ₹', 'Trailing SL ₹', 'P/L @ Trail SL ₹'],
                 t_rows, left_cols=(1, 9), font_px=11
             )
+            try:
+                _jd, _ = build_journal(processed_trades)
+                _js = _jd[(_jd['Company Name'] == str(sel_stock).strip().upper()) & (_jd['Type'] == sel_type)] if not _jd.empty else _jd
+                if len(_js):
+                    with st.expander("💸 Charges on this stock — every tranche, buy and sell"):
+                        _cr = [[(int(r['Position No.']), None), (int(r['Tranche No.']), None), (pd.Timestamp(r['Date']).strftime('%d-%b-%y'), None),
+                                (fmt_num(r['No. of Shares'], 0), None), (money(r['Buy Charges']), None),
+                                ("-" if pd.isna(r['Exit Date']) else pd.Timestamp(r['Exit Date']).strftime('%d-%b-%y'), None),
+                                (money(r['Sell Charges']) if r['Status'] == 'Closed' else "-", None),
+                                (r['Status'], None),
+                                (money(r['Net P/L'], 0), pl_color(r['Net P/L']))] for _, r in _js.sort_values(['Position No.', 'Tranche No.', 'Status']).iterrows()]
+                        _cr.append([("", None), ("", None), ("Total", None), (fmt_num(_js['No. of Shares'].sum(), 0), None),
+                                    (money(float(_js['Buy Charges'].sum())), None), ("", None),
+                                    (money(float(_js['Sell Charges'].sum())), None), ("", None),
+                                    (money(float(_js['Net P/L'].sum()), 0), pl_color(float(_js['Net P/L'].sum())))])
+                        render_compact_table(['Pos', 'T', 'Buy date', 'Shares', 'Buy charges', 'Sell date', 'Sell charges (incl. DP)', 'Status', 'Net P/L'],
+                                             _cr, left_cols=(2, 5, 7), auto_width=True, total_last=True, font_px=12)
+                        st.caption("Net P/L = P/L after buy and sell charges (open tranches: after buy charges only). Charges are this stock's share of each "
+                                   "contract note's day total, by trade value; the sale DP charge is flat per stock.")
+            except Exception:
+                pass
             if not pd.isna(trailing_sl):
                 trail_total = float((tranche_df['Qty'] * (trailing_sl - tranche_df['Buy Price'])).sum())
                 st.caption(f"Trailing SL ₹{trailing_sl:,.2f} = the last stop-loss entered. P/L @ Trail SL = "
