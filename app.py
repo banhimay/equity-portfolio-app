@@ -784,7 +784,7 @@ def fmt_num(v, decimals=2):
     s = f"{v:,.{decimals}f}"
     return s.rstrip('0').rstrip('.') if decimals > 0 and '.' in s else s
 
-def render_compact_table(headers, rows, left_cols=(), auto_width=False, total_last=False, font_px=12, fit=False, shrink=False, tot_rows=0):
+def render_compact_table(headers, rows, left_cols=(), auto_width=False, total_last=False, font_px=12, fit=False, shrink=False, tot_rows=0, bands=None):
     """Small-font HTML table that fits in one view. rows = list of lists of
     (text, css_color_or_None). total_last=True styles the last row as a total row.
     Works in light and dark themes."""
@@ -806,7 +806,17 @@ def render_compact_table(headers, rows, left_cols=(), auto_width=False, total_la
             "</style>")
         if shrink:   # columns only as wide as their content, table does not stretch to the page
             css = css.replace("</style>", "table.cmp.fit th,table.cmp.fit td{padding:2px 3px;}</style>")
-    head = "".join(f"<th>{html_lib.escape(h).replace('_', '_<wbr>') if fit else html_lib.escape(h)}</th>" for h in headers)
+    # bands = [(first_col, last_col, "r,g,b"), ...]: a soft colour band over those columns (header stronger), good in light and dark
+    def _band(ci):
+        for a, b, rgb in (bands or []):
+            if a <= ci <= b:
+                return rgb
+        return None
+    def _th(ci, h):
+        t = html_lib.escape(h).replace('_', '_<wbr>') if fit else html_lib.escape(h)
+        rgb = _band(ci)
+        return f"<th style='background:rgba({rgb},0.38);'>{t}</th>" if rgb else f"<th>{t}</th>"
+    head = "".join(_th(ci, h) for ci, h in enumerate(headers))
     body = ""
     for ri, r in enumerate(rows):
         tds = ""
@@ -835,6 +845,9 @@ def render_compact_table(headers, rows, left_cols=(), auto_width=False, total_la
                         "font-size:11px;line-height:1.15;'"
             else:
                 inner = html_lib.escape(str(text))
+            _rgb = _band(ci)
+            if _rgb and not bg:
+                style = (style[:-1] + f"background:rgba({_rgb},0.16);'") if style else f" style='background:rgba({_rgb},0.16);'"
             tds += f"<td{cls}{style}>{inner}</td>"
         tr_cls = " class='tot'" if ((total_last and ri == len(rows) - 1) or (tot_rows and ri >= len(rows) - tot_rows)) else ""
         body += f"<tr{tr_cls}>{tds}</tr>"
@@ -2255,8 +2268,9 @@ def render_tranche_sl_risk():
     render_compact_table(['Stock', 'Type', 'Status', 'Pos', 'T1 date', 'T1 buy ₹', 'T1 stop ₹', 'T1 risk ₹',
                           'T2 buy ₹', 'T2 stop ₹', 'T2 % below avg', 'T2 % below own',
                           'T3 buy ₹', 'T3 stop ₹', 'T3 % below avg', 'T3 % below own', 'Tranches'],
-                         tbl, left_cols=(0, 1, 2), font_px=12, fit=True, shrink=True)
-    st.caption("T1 stop is 10% below its buy price. T2 stop keeps the position's total ₹ risk equal to T1's risk, so it is only a few % below the "
+                         tbl, left_cols=(0, 1, 2), font_px=12, fit=True, shrink=True,
+                         bands=[(4, 7, "33,150,243"), (8, 11, "76,175,80"), (12, 15, "255,152,0")])
+    st.caption("Colour bands: blue = T1, green = T2, orange = T3. T1 stop is 10% below its buy price. T2 stop keeps the position's total ₹ risk equal to T1's risk, so it is only a few % below the "
                "average cost. T3 stop is the average cost of T1–T3, so it is 0% below average cost, but can be far below T3's own buy price. "
                "'% below avg' = how far the stop is below the position's average cost at that tranche; '% below own' = how far below that "
                "tranche's own buy price (what that tranche alone loses if the stop is hit). Stocks with one or two tranches show '-' for the missing ones, "
