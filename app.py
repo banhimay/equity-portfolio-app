@@ -1,3 +1,4 @@
+from io import BytesIO
 import streamlit as st
 import pandas as pd
 import yfinance as yf
@@ -3137,11 +3138,25 @@ elif page == "Trade Book":
             unsafe_allow_html=True
         )
 
-        st.download_button(
+        _dl = tb_view.drop(columns=['_id'])
+        _x = BytesIO()
+        with pd.ExcelWriter(_x, engine='openpyxl') as _w:
+            _dl.to_excel(_w, sheet_name="Trade_Book", index=False)
+            _ws = _w.sheets["Trade_Book"]
+            for _i, _c in enumerate(_dl.columns, start=1):
+                _ws.column_dimensions[_ws.cell(row=1, column=_i).column_letter].width = max(12, len(str(_c)) + 4)
+        dl1, dl2, _ = st.columns([1, 1, 4])
+        dl1.download_button(
             "⬇️ Download as CSV",
-            tb_view.drop(columns=['_id']).to_csv(index=False).encode('utf-8'),
+            _dl.to_csv(index=False).encode('utf-8'),
             file_name="trade_book.csv",
             mime="text/csv"
+        )
+        dl2.download_button(
+            "⬇️ Download as XLSX",
+            _x.getvalue(),
+            file_name="trade_book.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
 
 elif page == "Add Trade":
