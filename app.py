@@ -2276,6 +2276,83 @@ def render_tranche_sl_risk():
                "tranche's own buy price (what that tranche alone loses if the stop is hit). Stocks with one or two tranches show '-' for the missing ones, "
                "and a ₹0 bonus lot shows no stop. Sold = fully squared off, shown with the stops the ladder would have set.")
 
+PLANNER_JUMP_LIMIT = 0.20   # warn when the price is more than 20% above the last tranche
+
+def render_next_tranche_planner(sel_type, sel_stock, lots, cmp_price, ic_base):
+    """Next tranche for an open position: ideal size from the pyramid on today's IC base, quantity at the current price,
+    the checks, the stop-loss after the buy, and the FIFO sell order (oldest lots always go first)."""
+    try:
+        pos = [r for r in tranche_sl_risk_rows() if r['type'] == sel_type and r['stock'] == str(sel_stock).strip().upper() and r['open']]
+        if not pos or not ic_base or ic_base <= 0 or not cmp_price or cmp_price <= 0:
+            return
+        tr = pos[-1]['tr']
+        k = max(tr)                                  # tranches bought so far in this position
+        held_cost = sum(l['remaining'] * l['price'] for l in lots)
+        last = tr[k]
+        last_amt, last_px = last['q'] * last['px'], last['px']
+        st.markdown("#### 🧮 Next tranche planner (FIFO)")
+        n = k + 1
+        cap_pct = sum(p_ for _, p_ in IDEAL_PYRAMID[:min(n, len(IDEAL_PYRAMID))])
+        cap_amt = cap_pct / 100.0 * ic_base
+        checks, qty, ideal_amt, ideal_pct = [], 0, 0.0, None
+        over_cap_now = held_cost > sum(p_ for _, p_ in IDEAL_PYRAMID[:min(k, len(IDEAL_PYRAMID))]) / 100.0 * ic_base + 1
+        if n > len(IDEAL_PYRAMID):
+            checks.append(("Tranches used", f"✗ {k} of {len(IDEAL_PYRAMID)} — the pyramid is complete", False))
+        else:
+            ideal_pct = IDEAL_PYRAMID[n - 1][1]
+            ideal_amt = ideal_pct / 100.0 * ic_base
+            room = cap_amt - held_cost
+            allowed = min(ideal_amt, last_amt, max(room, 0.0))
+            qty = int(allowed // cmp_price)
+            jump = cmp_price / last_px - 1 if last_px > 0 else 0.0
+            checks.append((f"Not bigger than the last tranche (T{k} {money(last_amt, 0)})", "✓ OK" if ideal_amt <= last_amt + 1 else f"✗ ideal {money(ideal_amt, 0)} is bigger — capped at {money(last_amt, 0)}", ideal_amt <= last_amt + 1))
+            checks.append((f"Price vs last tranche (T{k} {money(last_px)})", f"{'✓' if jump <= PLANNER_JUMP_LIMIT else '⚠'} {jump:+.1%} (limit {PLANNER_JUMP_LIMIT:.0%} jump)", jump <= PLANNER_JUMP_LIMIT))
+            after = held_cost + qty * cmp_price
+            checks.append((f"Position after buy vs ideal cap for {n} tranches ({cap_pct:.2f}% = {money(cap_amt, 0)})",
+                           f"{'✓' if room > 0 else '✗'} {money(after, 0)} = {after / ic_base:.2%} of IC" + ("" if room > 0 else " — already at/over the cap"), room > 0))
+            checks.append(("Tranches used", f"✓ {n} of {len(IDEAL_PYRAMID)}", True))
+        qty_txt = f"{qty} shares ({money(qty * cmp_price, 0)})" if qty > 0 else "0 — do not add"
+        kpi_grid([("IC base (invested + cash)", money(ic_base, 0), None, None),
+                  ("Next tranche", f"T{n} · ideal {ideal_pct:.2f}%" if ideal_pct else f"T{n} · beyond T{len(IDEAL_PYRAMID)}", None, None),
+                  ("Ideal amount", money(ideal_amt, 0) if ideal_pct else "-", None, None),
+                  ("Current price", money(cmp_price), None, None),
+                  ("Qty to buy", qty_txt, None, None)], small=True)
+        render_compact_table(['Check', 'Result'],
+                             [[(a, None), (b, UP if ok else DOWN)] for a, b, ok in checks], left_cols=(0, 1), auto_width=True, font_px=12)
+        if qty > 0:
+            q_all = sum(t['q'] for t in tr.values()) + qty
+            c_all = sum(t['q'] * t['px'] for t in tr.values()) + qty * cmp_price
+            avg = c_all / q_all
+            if n == 2:
+                t1 = tr[1]
+                sl = avg - (0.10 * t1['px'] * t1['q']) / q_all
+            else:
+                sl = avg    # T3 onward: breakeven (T4+ may carry your manual stop; this is the floor)
+            st.markdown(f"**Stop-loss after this buy** ({'T2 rule: same ₹ risk as T1' if n == 2 else 'breakeven = average cost'}): "
+                        f"qty {q_all:,.0f} · average cost {money(avg)} · stop {money(sl)} "
+                        f"({(avg - sl) / avg:.2%} below average cost, {(cmp_price - sl) / cmp_price:.1%} below this tranche's price)")
+        if over_cap_now:
+            cap_k = sum(p_ for _, p_ in IDEAL_PYRAMID[:min(k, len(IDEAL_PYRAMID))]) / 100.0 * ic_base
+            excess = held_cost - cap_k
+            need, sold_txt, run = excess, [], 0.0
+            for l in lots:
+                if need <= 0:
+                    break
+                sh = min(l['remaining'], int(-(-need // l['price'])) if l['price'] > 0 else l['remaining'])
+                if sh <= 0:
+                    continue
+                sold_txt.append(f"{sh:,.0f} of the {pd.Timestamp(l['date']).strftime('%d-%b-%y')} lot @ {money(l['price'])}")
+                need -= sh * l['price']
+                run += sh * l['price']
+            st.markdown(f"**Over the ideal cap** by {money(excess, 0)} ({held_cost / ic_base:.2%} of IC vs {cap_k / ic_base:.2%}). "
+                        f"To trim under FIFO, the oldest shares go first: " + "; ".join(sold_txt) + f" (about {money(run, 0)} at cost).")
+        order = " → ".join(f"{l['remaining']:,.0f} sh @ {money(l['price'])} ({pd.Timestamp(l['date']).strftime('%d-%b-%y')})" for l in lots)
+        st.caption("FIFO sell order, oldest first: " + order + (f" → new T{n} lot" if qty > 0 else "") + ". "
+                   "Quantity = ideal % × IC ÷ price, rounded down, and never above the last tranche or the cap for the number of tranches. "
+                   "Ideal % are T1 2%, T2 1.75%, T3 1.5%, T4 1%, T5 0.75%. Position size is the cost of the shares you still hold.")
+    except Exception:
+        pass
+
 JOURNAL_COLS = ['Date', 'Long/Short', 'Type', 'Company Name', 'Position No.', 'Tranche No.', 'Entry Price',
                 'Account Balance', 'No. of Shares', 'Amount Deployed', 'Allocation %', 'Initial SL Price', 'Initial Risk',
                 'Current SL Price', 'Residual Risk', '1R Price', 'Actual Exit Price', 'Exit Date', '% Of Account Risked',
@@ -2929,6 +3006,7 @@ elif page == "Individual Stock":
                 render_tranche_pyramids(tranche_df, sel_stock, sel_type,
                                         cap_base=_ic_base if _ic_base > 0 else None,
                                         ic_pct=(_me['Inv'] / _ic_base) if (_me and _ic_base > 0) else None)
+            render_next_tranche_planner(sel_type, sel_stock, lots, cmp_price, _ic_base)
 
         closed_df = build_closed_lots_table(processed_trades, sel_type, sel_stock)
         if not closed_df.empty or not _closed_left:
