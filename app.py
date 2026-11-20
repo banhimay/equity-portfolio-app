@@ -568,6 +568,27 @@ def derived_cash_total():
     except Exception:
         return None
 
+def derived_cash_by_account(ent):
+    """Cash in each broker account, worked out automatically from the Cash Flow entries and the Trade Book:
+    deposits − transferred back − purchases + sale proceeds − Statutory & Broker Charges − DP Charges."""
+    out = {}
+    tb = trades_df
+    for a in ACCOUNTS:
+        e = ent[ent['account'] == a]
+        k = e['kind']
+        dep = float(e.loc[k == 'DEPOSIT', 'amount'].sum())
+        back = float(e.loc[k == 'TRANSFER_BACK', 'amount'].sum())
+        chg = float(e.loc[k.isin(['CHARGE', 'DP_CHARGE']), 'amount'].sum())
+        t = tb[tb['Account'] == a] if 'Account' in tb.columns else tb.iloc[0:0]
+        net_buys = float((t['Unit'].astype(float) * t['Price'].astype(float)).sum())
+        out[a] = round(dep - back - net_buys - chg, 2)
+    return out
+
+def untagged_trade_count():
+    if 'Account' not in trades_df.columns:
+        return 0
+    return int(trades_df['Account'].isna().sum() + (trades_df['Account'].astype(str).str.strip() == '').sum())
+
 portfolio_df, processed_trades = compute_portfolio(trades_df, overrides_df, derived_cash_total())
 
 # --- INDIVIDUAL STOCK TRANCHE + STOP-LOSS ENGINE ---
@@ -1177,8 +1198,8 @@ def audit_cash_total():
     if not DATABASE_URL:
         return 0.0
     try:
-        _, bal = load_cash()
-        return float(sum(bal.get(a, 0.0) for a in ACCOUNTS))
+        ent, _ = load_cash()
+        return float(sum(derived_cash_by_account(ent).values()))
     except Exception:
         return 0.0
 
@@ -2341,7 +2362,8 @@ def render_portfolio_xirr(open_df):
     if not DATABASE_URL:
         return
     try:
-        ent, bal = load_cash()
+        ent, _typed = load_cash()
+        bal = derived_cash_by_account(ent)
     except Exception:
         return
     ent = ent.dropna(subset=['date'])
@@ -3168,7 +3190,8 @@ elif page == "Cash Flow":
         st.info("The Cash Flow page needs the database (DATABASE_URL), which is not connected here.")
         st.stop()
     try:
-        ent, bal = load_cash()
+        ent, typed_bal = load_cash()
+        bal = derived_cash_by_account(ent)
     except Exception as exc:
         st.error(f"Could not read the cash-flow data: {exc}")
         st.stop()
@@ -3186,6 +3209,9 @@ elif page == "Cash Flow":
     bro_chg, dp_chg = _sum(ent, 'CHARGE'), _sum(ent, 'DP_CHARGE')
     chg = bro_chg + dp_chg
     cash_total = float(sum(bal.get(a, 0.0) for a in ACCOUNTS))
+    _unt = untagged_trade_count()
+    if _unt:
+        st.warning(f"{_unt} trade(s) in the Trade Book have no account (YWA415/JAE735) and are left out of the cash balances. Tag them in the Trade Book.")
     net_dep = dep - back
     total_value = equity_val + cash_total   # worth now: shares at market value + cash
     gross = equity_val + cash_total - net_dep
@@ -3219,6 +3245,11 @@ elif page == "Cash Flow":
     st.caption(("Exposed and Equity Value are the figures you typed in (see ✏️ below)." if ovr else
                 "Exposed and Equity Value come from the holdings in this app (both accounts together).") +
                " Gross Profit = Equity Value + Cash Balance − Net Deployed. Net Profit = Gross Profit + Dividends received − Statutory & Broker Charges − DP Charges.")
+    st.caption("💵 **How Cash Balance is derived:** the money lying unused in each broker account = Deposits − Transferred back to bank "
+               "− cost of shares bought + sale proceeds − Statutory & Broker Charges − DP Charges. "
+               "It is calculated automatically from the Cash Flow entries and the Trade Book (each account separately); "
+               "the Cash Balance tile is both accounts added together. The figure you type from the broker/ledger (✏️ below) is only used "
+               "to cross-check and flag any difference. Dividends go to your bank, not into broker cash.")
 
     for acct in ACCOUNTS:
         a_ent = ent[ent['account'] == acct]
@@ -3233,6 +3264,15 @@ elif page == "Cash Flow":
             ("DP Charges", money(a_dp), None, None),
             ("Cash Balance", money(bal.get(acct, 0.0)), None, None),
         ])
+        _t = typed_bal.get(acct)
+        if _t is not None:
+            _d = round(bal.get(acct, 0.0) - float(_t), 2)
+            if abs(_d) >= 1:
+                st.warning(f"⚠️ {acct}: the app's cash {money(bal.get(acct, 0.0))} differs from the broker/ledger figure you entered "
+                           f"({money(float(_t))}) by {money(abs(_d))}. Check for a missing or wrong trade, charge, deposit or transfer, "
+                           f"or update the broker figure below once the contract note/ledger is verified.")
+            else:
+                st.caption(f"✅ {acct}: matches the broker/ledger figure ({money(float(_t))}).")
 
         def _dated_rows(kind):
             sub = a_ent[a_ent['kind'] == kind]
@@ -3336,13 +3376,13 @@ elif page == "Cash Flow":
                 st.session_state["cash_msg"] = "Now using the holdings from this app."
                 st.rerun()
         with st.form("cash_balance_form"):
-            st.markdown("**Cash balance** (type the figure from your broker)")
+            st.markdown("**Broker / ledger cash balance** (type the figure from your broker or contract note — used only to cross-check the automatic balance)")
             h1, h2 = st.columns(2)
             h_acct = h1.selectbox("Account", ACCOUNTS, key="bal_acct")
             h_amt = h2.number_input("Cash balance (₹)", min_value=0.0, step=1.0)
             if st.form_submit_button("Save cash balance"):
                 cash_set_balance(h_acct, h_amt)
-                st.session_state["cash_msg"] = f"Cash balance for {h_acct} set to {money(h_amt)}."
+                st.session_state["cash_msg"] = f"Broker/ledger cash balance for {h_acct} recorded as {money(h_amt)} (cross-check only)."
                 st.rerun()
 
     with st.expander("🗑️ Remove an entry"):
