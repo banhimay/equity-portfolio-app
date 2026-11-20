@@ -1504,7 +1504,7 @@ def render_fy_reports():
                              use_container_width=True, hide_index=True)
 
 PAGES = ["Dashboard Overview", "Core Holdings", "Satellite Holdings",
-         "Profit/Loss", "Weekly Unrealized P/L", "Core & Satellite Audit", "FY P&L and Balance Sheet", "Individual Stock", "Trailing Stop Loss", "Trading Journal", "Trade Book & Add Trade", "Cash Flow", "CMP Overrides"]
+         "Profit/Loss", "Weekly Unrealized P/L", "Core & Satellite Audit", "FY P&L and Balance Sheet", "Individual Stock", "Trailing Stop Loss", "Tranche Stop-Loss Risk", "Trading Journal", "Trade Book & Add Trade", "Cash Flow"]
 
 def do_logout():
     st.session_state["authenticated"] = False
@@ -1514,8 +1514,7 @@ def do_refresh():
 
 NAV_LABELS = {
     "Dashboard Overview": "🏠 Overview", "Core Holdings": "🎯 Core", "Satellite Holdings": "🚀 Satellite",
-    "Profit/Loss": "📉 Profit/Loss", "Weekly Unrealized P/L": "📅 Weekly", "Core & Satellite Audit": "🧾 Audit", "FY P&L and Balance Sheet": "🏦 FY Reports", "Individual Stock": "🔍 Stock", "Trailing Stop Loss": "🛡️ Trailing SL", "Trading Journal": "📓 Journal", "Trade Book & Add Trade": "📒 Trades", "Cash Flow": "💰 Cash Flow",
-    "CMP Overrides": "⚙️ CMP",
+    "Profit/Loss": "📉 Profit/Loss", "Weekly Unrealized P/L": "📅 Weekly", "Core & Satellite Audit": "🧾 Audit", "FY P&L and Balance Sheet": "🏦 FY Reports", "Individual Stock": "🔍 Stock", "Trailing Stop Loss": "🛡️ Trailing SL", "Tranche Stop-Loss Risk": "📐 Tranche SL Risk", "Trading Journal": "📓 Journal", "Trade Book & Add Trade": "📒 Trades", "Cash Flow": "💰 Cash Flow",
 }
 
 def _nav_changed():
@@ -2190,6 +2189,78 @@ def render_stock_charges(sel_type, sel_stock):
                            "contract note's day total, by trade value; the sale DP charge is flat per stock.")
     except Exception:
         pass
+
+def tranche_sl_risk_rows():
+    """One row per position (a stock held, or sold out), from the Trading Journal's tranche data:
+    T1 buy and stop, then the effective stop of T2 and T3 as % below the position's average cost and below the tranche's own price."""
+    jdf, _ = build_journal(processed_trades)
+    out = []
+    if jdf is None or jdf.empty:
+        return out
+    for (pt, stk, pno), g in jdf.groupby(['Type', 'Company Name', 'Position No.']):
+        tr = {}
+        for k, h in g.groupby('Tranche No.'):
+            q = float(h['No. of Shares'].sum())
+            tr[int(k)] = {'date': h['Date'].iloc[0], 'px': float(h['Entry Price'].iloc[0]), 'sl': h['Initial SL Price'].iloc[0], 'q': q,
+                          'risk': float(h['Initial Risk'].sum(min_count=1)) if h['Initial Risk'].notna().any() else float('nan')}
+        cq = ci = 0.0
+        for k in sorted(tr):
+            cq += tr[k]['q']
+            ci += tr[k]['q'] * tr[k]['px']
+            tr[k]['avg'] = ci / cq if cq else float('nan')
+        out.append({'type': pt, 'stock': stk, 'pos': int(pno), 'open': bool((g['Status'] == 'Open').any()), 'tr': tr})
+    out.sort(key=lambda r: (not r['open'], r['stock'], r['pos']))
+    return out
+
+def render_tranche_sl_risk():
+    rows = tranche_sl_risk_rows()
+    if not rows:
+        st.info("No trades yet.")
+        return
+    c1, c2 = st.columns(2)
+    with c1:
+        f_status = st.segmented_control("Status", ["All", "Holding", "Sold"], default="All", key="tsl_status")
+    with c2:
+        f_type = st.segmented_control("Type", ["All", "CORE", "SATELLITE"], default="All", key="tsl_type")
+    pct2 = lambda x: "-" if x is None or pd.isna(x) else f"{x:.2%}"
+    tbl = []
+    for r in rows:
+        if f_status == "Holding" and not r['open'] or f_status == "Sold" and r['open']:
+            continue
+        if f_type in ("CORE", "SATELLITE") and r['type'] != f_type:
+            continue
+        t = r['tr']
+        t1, t2, t3 = t.get(1), t.get(2), t.get(3)
+        def sl_info(x):
+            if x is None or pd.isna(x['sl']):
+                return None
+            return x
+        cells = [(r['stock'], None), ("Core" if r['type'] == "CORE" else "Sat", None), ("Holding" if r['open'] else "Sold", "#1F4E78" if r['open'] else None),
+                 (f"#{r['pos']}", None),
+                 (pd.Timestamp(t1['date']).strftime('%d-%b-%y') if t1 else "-", None),
+                 (money(t1['px']) if t1 else "-", None),
+                 (money(t1['sl']) if t1 and pd.notna(t1['sl']) else "-", None),
+                 (money(t1['risk'], 0) if t1 and pd.notna(t1['risk']) else "-", None)]
+        for x in (t2, t3):
+            if x is None or pd.isna(x['sl']) or x['px'] <= 0:
+                cells += [(money(x['px']) if x else "-", None), ("-", None), ("-", None), ("-", None)]
+            else:
+                cells += [(money(x['px']), None), (money(x['sl']), None),
+                          (pct2((x['avg'] - x['sl']) / x['avg']), None), (pct2((x['px'] - x['sl']) / x['px']), None)]
+        cells.append((len(t), None))
+        tbl.append(cells)
+    if not tbl:
+        st.caption("Nothing matches these filters.")
+        return
+    render_compact_table(['Stock', 'Type', 'Status', 'Pos', 'T1 date', 'T1 buy ₹', 'T1 stop ₹', 'T1 risk ₹',
+                          'T2 buy ₹', 'T2 stop ₹', 'T2 % below avg', 'T2 % below own',
+                          'T3 buy ₹', 'T3 stop ₹', 'T3 % below avg', 'T3 % below own', 'Tranches'],
+                         tbl, left_cols=(0, 1, 2), font_px=12, fit=True, shrink=True)
+    st.caption("T1 stop is 10% below its buy price. T2 stop keeps the position's total ₹ risk equal to T1's risk, so it is only a few % below the "
+               "average cost. T3 stop is the average cost of T1–T3, so it is 0% below average cost, but can be far below T3's own buy price. "
+               "'% below avg' = how far the stop is below the position's average cost at that tranche; '% below own' = how far below that "
+               "tranche's own buy price (what that tranche alone loses if the stop is hit). Stocks with one or two tranches show '-' for the missing ones, "
+               "and a ₹0 bonus lot shows no stop. Sold = fully squared off, shown with the stops the ladder would have set.")
 
 JOURNAL_COLS = ['Date', 'Long/Short', 'Type', 'Company Name', 'Position No.', 'Tranche No.', 'Entry Price',
                 'Account Balance', 'No. of Shares', 'Amount Deployed', 'Allocation %', 'Initial SL Price', 'Initial Risk',
@@ -2896,6 +2967,10 @@ elif page == "Trailing Stop Loss":
                    "(tranche 4+), otherwise the rule-based SL of its last tranche. Tranche = number of open "
                    "tranches. Difference from CMP = CMP − Trailing SL (green = CMP above the stop, red = below). Stocks are listed with the most tranches first.")
 
+elif page == "Tranche Stop-Loss Risk":
+    st.subheader("📐 Tranche Stop-Loss Risk")
+    render_tranche_sl_risk()
+
 elif page == "Trading Journal":
     st.subheader("📓 Trading Journal")
     render_journal()
@@ -3505,12 +3580,3 @@ elif page == "Cash Flow":
                 cash_delete_entry(pick)
                 st.session_state["cash_msg"] = f"Removed: {names[pick]}"
                 st.rerun()
-
-elif page == "CMP Overrides":
-    st.subheader("⚙️ Price Overrides")
-    st.info("Add a row here if the automated price lags or fails for a symbol.")
-    edited_override = st.data_editor(overrides_df, num_rows="dynamic", use_container_width=True)
-    if st.button("Save Overrides"):
-        save_data(trades_df, edited_override)
-        st.success("Overrides updated!")
-        st.rerun()
