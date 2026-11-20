@@ -2167,6 +2167,30 @@ def build_journal(trades):
     }
     return jdf, summary
 
+def render_stock_charges(sel_type, sel_stock):
+    """Charges on one stock: every tranche (open or closed) with its buy charges, sell charges and Net P/L."""
+    try:
+        _jd, _ = build_journal(processed_trades)
+        _js = _jd[(_jd['Company Name'] == str(sel_stock).strip().upper()) & (_jd['Type'] == sel_type)] if not _jd.empty else _jd
+        if len(_js):
+            with st.expander("💸 Charges on this stock — every tranche, buy and sell", expanded=bool((_js['Status'] == 'Closed').all())):
+                _cr = [[(int(r['Position No.']), None), (int(r['Tranche No.']), None), (pd.Timestamp(r['Date']).strftime('%d-%b-%y'), None),
+                        (fmt_num(r['No. of Shares'], 0), None), (money(r['Buy Charges']), None),
+                        ("-" if pd.isna(r['Exit Date']) else pd.Timestamp(r['Exit Date']).strftime('%d-%b-%y'), None),
+                        (money(r['Sell Charges']) if r['Status'] == 'Closed' else "-", None),
+                        (r['Status'], None),
+                        (money(r['Net P/L'], 0), pl_color(r['Net P/L']))] for _, r in _js.sort_values(['Position No.', 'Tranche No.', 'Status']).iterrows()]
+                _cr.append([("", None), ("", None), ("Total", None), (fmt_num(_js['No. of Shares'].sum(), 0), None),
+                            (money(float(_js['Buy Charges'].sum())), None), ("", None),
+                            (money(float(_js['Sell Charges'].sum())), None), ("", None),
+                            (money(float(_js['Net P/L'].sum()), 0), pl_color(float(_js['Net P/L'].sum())))])
+                render_compact_table(['Pos', 'T', 'Buy date', 'Shares', 'Buy charges', 'Sell date', 'Sell charges (incl. DP)', 'Status', 'Net P/L'],
+                                     _cr, left_cols=(2, 5, 7), auto_width=True, total_last=True, font_px=12)
+                st.caption("Net P/L = P/L after buy and sell charges (open tranches: after buy charges only). Charges are this stock's share of each "
+                           "contract note's day total, by trade value; the sale DP charge is flat per stock.")
+    except Exception:
+        pass
+
 JOURNAL_COLS = ['Date', 'Long/Short', 'Type', 'Company Name', 'Position No.', 'Tranche No.', 'Entry Price',
                 'Account Balance', 'No. of Shares', 'Amount Deployed', 'Allocation %', 'Initial SL Price', 'Initial Risk',
                 'Current SL Price', 'Residual Risk', '1R Price', 'Actual Exit Price', 'Exit Date', '% Of Account Risked',
@@ -2616,6 +2640,7 @@ elif page == "Individual Stock":
         _closed_left = False
         if not lots:
             st.info("No open position — this stock is fully squared off. Its realized results are below.")
+            render_stock_charges(sel_type, sel_stock)
         else:
             stock_manual = {}
             if not manual_sl_df.empty:
@@ -2698,27 +2723,7 @@ elif page == "Individual Stock":
                  'Δ Prev', 'Δ CMP', 'SL Rule', 'SL ₹', 'Risk ₹', 'P/L ₹', 'Trailing SL ₹', 'P/L @ Trail SL ₹'],
                 t_rows, left_cols=(1, 9), font_px=11
             )
-            try:
-                _jd, _ = build_journal(processed_trades)
-                _js = _jd[(_jd['Company Name'] == str(sel_stock).strip().upper()) & (_jd['Type'] == sel_type)] if not _jd.empty else _jd
-                if len(_js):
-                    with st.expander("💸 Charges on this stock — every tranche, buy and sell"):
-                        _cr = [[(int(r['Position No.']), None), (int(r['Tranche No.']), None), (pd.Timestamp(r['Date']).strftime('%d-%b-%y'), None),
-                                (fmt_num(r['No. of Shares'], 0), None), (money(r['Buy Charges']), None),
-                                ("-" if pd.isna(r['Exit Date']) else pd.Timestamp(r['Exit Date']).strftime('%d-%b-%y'), None),
-                                (money(r['Sell Charges']) if r['Status'] == 'Closed' else "-", None),
-                                (r['Status'], None),
-                                (money(r['Net P/L'], 0), pl_color(r['Net P/L']))] for _, r in _js.sort_values(['Position No.', 'Tranche No.', 'Status']).iterrows()]
-                        _cr.append([("", None), ("", None), ("Total", None), (fmt_num(_js['No. of Shares'].sum(), 0), None),
-                                    (money(float(_js['Buy Charges'].sum())), None), ("", None),
-                                    (money(float(_js['Sell Charges'].sum())), None), ("", None),
-                                    (money(float(_js['Net P/L'].sum()), 0), pl_color(float(_js['Net P/L'].sum())))])
-                        render_compact_table(['Pos', 'T', 'Buy date', 'Shares', 'Buy charges', 'Sell date', 'Sell charges (incl. DP)', 'Status', 'Net P/L'],
-                                             _cr, left_cols=(2, 5, 7), auto_width=True, total_last=True, font_px=12)
-                        st.caption("Net P/L = P/L after buy and sell charges (open tranches: after buy charges only). Charges are this stock's share of each "
-                                   "contract note's day total, by trade value; the sale DP charge is flat per stock.")
-            except Exception:
-                pass
+            render_stock_charges(sel_type, sel_stock)
             if not pd.isna(trailing_sl):
                 trail_total = float((tranche_df['Qty'] * (trailing_sl - tranche_df['Buy Price'])).sum())
                 st.caption(f"Trailing SL ₹{trailing_sl:,.2f} = the last stop-loss entered. P/L @ Trail SL = "
