@@ -2277,6 +2277,7 @@ def render_tranche_sl_risk():
                "and a ₹0 bonus lot shows no stop. Sold = fully squared off, shown with the stops the ladder would have set.")
 
 PLANNER_JUMP_LIMIT = 0.20   # warn when the price is more than 20% above the last tranche
+PLANNER_MIN_STEP = 0.08     # next tranche must be at least 8% above the last tranche's buy price
 
 def render_next_tranche_planner(sel_type, sel_stock, lots, cmp_price, ic_base):
     """Next tranche for an open position: ideal size from the pyramid on today's IC base, quantity at the current price,
@@ -2303,8 +2304,14 @@ def render_next_tranche_planner(sel_type, sel_stock, lots, cmp_price, ic_base):
             ideal_amt = ideal_pct / 100.0 * ic_base
             room = cap_amt - held_cost
             allowed = min(ideal_amt, last_amt, max(room, 0.0))
-            qty = int(allowed // cmp_price)
             jump = cmp_price / last_px - 1 if last_px > 0 else 0.0
+            trigger_px = last_px * (1 + PLANNER_MIN_STEP)
+            price_ok = last_px <= 0 or cmp_price >= trigger_px - 1e-9
+            qty = int(allowed // cmp_price) if price_ok else 0
+            checks.append((f"Price not below the last tranche's buy price (T{k} {money(last_px)})",
+                           "✓ OK" if cmp_price >= last_px else f"✗ current {money(cmp_price)} is below — no averaging down", cmp_price >= last_px))
+            checks.append((f"Price at least {PLANNER_MIN_STEP:.0%} above the last tranche (needs {money(trigger_px)} or more)",
+                           f"{'✓' if price_ok else '✗'} {jump:+.1%} vs T{k}" + ("" if price_ok else f" — wait for {money(trigger_px)}"), price_ok))
             checks.append((f"Not bigger than the last tranche (T{k} {money(last_amt, 0)})", "✓ OK" if ideal_amt <= last_amt + 1 else f"✗ ideal {money(ideal_amt, 0)} is bigger — capped at {money(last_amt, 0)}", ideal_amt <= last_amt + 1))
             checks.append((f"Price vs last tranche (T{k} {money(last_px)})", f"{'✓' if jump <= PLANNER_JUMP_LIMIT else '⚠'} {jump:+.1%} (limit {PLANNER_JUMP_LIMIT:.0%} jump)", jump <= PLANNER_JUMP_LIMIT))
             after = held_cost + qty * cmp_price
@@ -2312,6 +2319,8 @@ def render_next_tranche_planner(sel_type, sel_stock, lots, cmp_price, ic_base):
                            f"{'✓' if room > 0 else '✗'} {money(after, 0)} = {after / ic_base:.2%} of IC" + ("" if room > 0 else " — already at/over the cap"), room > 0))
             checks.append(("Tranches used", f"✓ {n} of {len(IDEAL_PYRAMID)}", True))
         qty_txt = f"{qty} shares ({money(qty * cmp_price, 0)})" if qty > 0 else "0 — do not add"
+        if qty == 0 and ideal_pct is not None and not price_ok:
+            qty_txt = f"0 — wait for {money(trigger_px)}"
         kpi_grid([("IC base (invested + cash)", money(ic_base, 0), None, None),
                   ("Next tranche", f"T{n} · ideal {ideal_pct:.2f}%" if ideal_pct else f"T{n} · beyond T{len(IDEAL_PYRAMID)}", None, None),
                   ("Ideal amount", money(ideal_amt, 0) if ideal_pct else "-", None, None),
