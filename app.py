@@ -1266,22 +1266,12 @@ def render_audit(title, ptype, other_type):
     if not own:
         st.caption("No open positions.")
         return
-    if IS_MOBILE:
-        cards = []
-        for i, r in enumerate(own, start=1):
-            st.button(f"{i}.  {r['Stock']}", key=f"aub_{ptype}_{i}_{r['Stock']}", type="tertiary",
-                      on_click=go_to_stock, args=(stock_label(ptype, r['Stock']),))
-            render_cards([card_html(
-                right=f"{r['ROI']:+.1%}", right_color=pl_color(r['ROI']),
-                items=[("Start", fmt_date(pd.Timestamp(r['Start'])) if r['Start'] else "-", None), ("HP (month)", "-" if r['HP'] is None else str(r['HP']), None),
-                       ("Qty", f"{r['Qty']:,}", None), ("Avg buy", money(r['Avg']), None), ("CMP", money(r['CMP']), None),
-                       ("Invested", money(r['Inv']), None), ("Current", money(r['Cur']), None),
-                       ("IC", pct(r['Inv'], inv_all), None), ("CC", pct(r['Cur'], cur_all), None)])])
-    else:
-        stock_link_pills(ptype, [r['Stock'] for r in own], f"au_open_{ptype}")
+    if True:   # same compact-table view on phone and computer (like Tranche Stop-Loss Risk)
+        if not IS_MOBILE:
+            stock_link_pills(ptype, [r['Stock'] for r in own], f"au_open_{ptype}")
         rows = []
         for i, r in enumerate(own, start=1):
-            rows.append([(i, None), (("LINK", f"au_open_{ptype}", r['Stock']), None), (fmt_date(pd.Timestamp(r['Start'])) if r['Start'] else "-", None),
+            rows.append([(i, None), ((r['Stock'] if IS_MOBILE else ("LINK", f"au_open_{ptype}", r['Stock'])), None), (fmt_date(pd.Timestamp(r['Start'])) if r['Start'] else "-", None),
                          (f"{r['Qty']:,}", None), (money(r['Avg']), None), (money(r['CMP']), None),
                          (money(r['Inv']), None), (money(r['Cur']), None),
                          ("-" if r['HP'] is None else r['HP'], None),
@@ -1305,12 +1295,7 @@ def render_audit_split():
     for label, a, b in (("Core", inv_c, cur_c), ("Satellite", inv_s, cur_s), ("Cash", cash, cash), ("Total", inv_all, cur_all)):
         summ.append([(label, None), (money(a), None), (money(b), None), (pct(a, inv_all), None), (pct(b, cur_all), None), roi(a, b)])
     st.markdown("#### Portfolio split")
-    if IS_MOBILE:
-        render_cards([card_html(title=r[0][0], right=r[5][0], right_color=r[5][1],
-                                items=[("Invested", r[1][0], None), ("Current", r[2][0], None),
-                                       ("IC", r[3][0], None), ("CC", r[4][0], None)],
-                                total=(r[0][0] == "Total")) for r in summ])
-    else:
+    if True:
         render_compact_table(['Portfolio split', 'Invested Value', 'Current Value', 'IC (%)', 'CC (%)', 'ROI (%)'],
                              summ, left_cols=(0,), total_last=True, font_px=12, fit=True, shrink=True)
 
@@ -3096,25 +3081,12 @@ elif page == "Weekly Unrealized P/L":
             tot_by_f = wk.groupby('friday')['unrealized'].sum()
             def _lbl(f):
                 return pd.Timestamp(f).strftime("%d-%b-%y")
-            if IS_MOBILE:
-                pick = st.selectbox("Friday", [ _lbl(f) for f in all_f ], index=0)
-                f_sel = next(f for f in all_f if _lbl(f) == pick)
-                day = wk[wk['friday'] == f_sel]
-                for ptype in ("SATELLITE", "CORE"):
-                    for _, r in day[day['type'] == ptype].sort_values('stock').iterrows():
-                        st.button(r['stock'], key=f"wkb_{ptype}_{r['stock']}", type="tertiary",
-                                  on_click=go_to_stock, args=(stock_label(ptype, r['stock']),))
-                        render_cards([card_html(badge=ptype.title(), right=money(r['unrealized']),
-                                                right_color=pl_color(r['unrealized']),
-                                                items=[("Units", f"{r['units']:,.0f}", None), ("Cost", money(r['cost']), None),
-                                                       ("Close", money(r['close']), None)])])
-                render_cards([card_html(title="Total", right=money(float(tot_by_f[f_sel])),
-                                        right_color=pl_color(float(tot_by_f[f_sel])), total=True, items=[])])
-            else:
+            if True:   # same compact-table view on phone and computer (like Tranche Stop-Loss Risk)
                 hdr = ['#', 'Stock'] + [_lbl(f) for f in shown]
                 _sel = set(st.session_state.get("wk_pct_sel", []))
                 show_all = st.toggle("Show % growth / fall vs previous Friday for all stocks", value=False, key="wk_show_pct")
-                st.caption("Or click the small **+%** next to a stock's name to show its % change row (click **−%** to hide it again).")
+                if not IS_MOBILE:
+                    st.caption("Or click the small **+%** next to a stock's name to show its % change row (click **−%** to hide it again).")
                 for ptype, ttl in (("SATELLITE", "🚀 Satellite Holdings"), ("CORE", "🎯 Core Holdings")):
                     sub = wk[(wk['type'] == ptype) & (wk['friday'].isin(shown))]
                     if sub.empty:
@@ -3124,8 +3096,9 @@ elif page == "Weekly Unrealized P/L":
                     piv_all = wk[wk['type'] == ptype].pivot_table(index='stock', columns='friday', values='unrealized', aggfunc='sum')
                     piv_cl = sub.pivot_table(index='stock', columns='friday', values='close', aggfunc='last')
                     order = sorted(piv.index)
-                    stock_link_pills(ptype, order, f"wk_open_{ptype}")
-                    stock_toggle_pills(order, f"wk_pct_{ptype}", "wk_pct_sel", ptype)
+                    if not IS_MOBILE:
+                        stock_link_pills(ptype, order, f"wk_open_{ptype}")
+                        stock_toggle_pills(order, f"wk_pct_{ptype}", "wk_pct_sel", ptype)
                     def _pct_cell(cur, prev):
                         """% growth / fall of unrealized P/L vs the previous Friday (sign = direction of the move)."""
                         if pd.isna(cur) or pd.isna(prev) or abs(prev) < 0.005:
@@ -3157,12 +3130,12 @@ elif page == "Weekly Unrealized P/L":
                                           "#B71C1C" if p1 < p0 else "#2E7D32")
                             except Exception:
                                 pass
-                            return (("WRAP", f"▼ {worst:.1f}% fall from {_lbl(peak_d)} highest value"), "#B71C1C"), pf
+                            return (("WRAP", f"▼ {worst:.1f}% fall from {_lbl(peak_d)}"), "#B71C1C"), pf
                         return ("N/A", None), ("N/A", None)
                     trs = []
                     for i, stk in enumerate(order, start=1):
                         _on = show_all or f"{ptype}|{stk}" in _sel
-                        cells = [(i, None), (("LINK", f"wk_open_{ptype}", stk, f"wk_pct_{ptype}", _on), None)]
+                        cells = [(i, None), ((stk if IS_MOBILE else ("LINK", f"wk_open_{ptype}", stk, f"wk_pct_{ptype}", _on)), None)]
                         pcts = [("", None), ("", None)]
                         for f in shown:
                             v = piv.loc[stk].get(f, float('nan'))
