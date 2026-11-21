@@ -3122,6 +3122,7 @@ elif page == "Weekly Unrealized P/L":
                     st.markdown(f"#### {ttl}")
                     piv = sub.pivot_table(index='stock', columns='friday', values='unrealized', aggfunc='sum')
                     piv_all = wk[wk['type'] == ptype].pivot_table(index='stock', columns='friday', values='unrealized', aggfunc='sum')
+                    piv_cl = sub.pivot_table(index='stock', columns='friday', values='close', aggfunc='last')
                     order = sorted(piv.index)
                     stock_link_pills(ptype, order, f"wk_open_{ptype}")
                     stock_toggle_pills(order, f"wk_pct_{ptype}", "wk_pct_sel", ptype)
@@ -3134,19 +3135,30 @@ elif page == "Weekly Unrealized P/L":
                     def _prev_f(f):
                         fi = all_f.index(f)
                         return all_f[fi + 1] if fi + 1 < len(all_f) else None
-                    def _fall_alert(series):
-                        """Deepest fall (15% or more) on any later Friday from the highest unrealized P/L among the shown Fridays."""
+                    def _fall_alert(series, close_series=None):
+                        """Deepest fall (15% or more) on any later Friday from the highest unrealized P/L among the shown Fridays.
+                        Returns (alert cell, price-fall cell); the price fall is the stock price's % fall from its close in the
+                        peak-P/L week to its latest close."""
                         ser = series.reindex(sorted(shown)).dropna()          # oldest -> newest
                         if ser.empty or ser.max() <= 0:
-                            return ("N/A", None)
+                            return ("N/A", None), ("N/A", None)
                         peak_d, peak = ser.idxmax(), float(ser.max())
                         later = ser[ser.index > peak_d]
                         if later.empty:
-                            return ("N/A", None)
+                            return ("N/A", None), ("N/A", None)
                         worst = float((peak - later.min()) / peak * 100)
                         if worst >= 15:
-                            return (("WRAP", f"▼ {worst:.1f}% fall from {_lbl(peak_d)} highest value"), "#B71C1C")
-                        return ("N/A", None)
+                            pf = ("N/A", None)
+                            try:
+                                cs = close_series.reindex(sorted(shown)).dropna()
+                                p0, p1 = float(cs.loc[peak_d]), float(cs.iloc[-1])
+                                if p0 > 0:
+                                    pf = (f"▼ {(p0 - p1) / p0 * 100:.1f}%" if p1 < p0 else f"▲ {(p1 - p0) / p0 * 100:.1f}%",
+                                          "#B71C1C" if p1 < p0 else "#2E7D32")
+                            except Exception:
+                                pass
+                            return (("WRAP", f"▼ {worst:.1f}% fall from {_lbl(peak_d)} highest value"), "#B71C1C"), pf
+                        return ("N/A", None), ("N/A", None)
                     trs = []
                     for i, stk in enumerate(order, start=1):
                         _on = show_all or f"{ptype}|{stk}" in _sel
@@ -3158,8 +3170,10 @@ elif page == "Weekly Unrealized P/L":
                             pf = _prev_f(f)
                             pv = piv_all.loc[stk].get(pf, float('nan')) if (pf is not None and stk in piv_all.index) else float('nan')
                             pcts.append(_pct_cell(v, pv))
-                        cells.append(_fall_alert(piv.loc[stk]))
-                        pcts.append(("", None))
+                        _al, _pf = _fall_alert(piv.loc[stk], piv_cl.loc[stk])
+                        cells.append(_al)
+                        cells.append(_pf)
+                        pcts.append(("", None)); pcts.append(("", None))
                         trs.append(cells)
                         if _on:
                             trs.append(pcts)
@@ -3171,11 +3185,11 @@ elif page == "Weekly Unrealized P/L":
                         tots.append(("–", None) if pd.isna(tv) else (money(tv, 0), pl_color(tv)))
                         pf = _prev_f(f)
                         tot_pcts.append(_pct_cell(tv, float(_tp[pf]) if (pf is not None and pf in _tp.index) else float('nan')))
-                    tots.append(("", None)); tot_pcts.append(("", None))
+                    tots += [("", None), ("", None)]; tot_pcts += [("", None), ("", None)]
                     trs.append(tots)
                     if show_all:
                         trs.append(tot_pcts)
-                    render_compact_table(hdr + ['Alert'], trs, left_cols=(1, 2 + len(shown)), tot_rows=2 if show_all else 1,
+                    render_compact_table(hdr + ['Alert', 'Price fall'], trs, left_cols=(1, 2 + len(shown)), tot_rows=2 if show_all else 1,
                                          font_px=12, fit=True, shrink=True)
                 st.markdown("#### 📊 All holdings")
                 tr1 = [("", None), ("Unrealized P/L", None)]
