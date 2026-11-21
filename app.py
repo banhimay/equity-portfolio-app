@@ -2276,7 +2276,7 @@ def render_tranche_sl_risk():
                "tranche's own buy price (what that tranche alone loses if the stop is hit). Stocks with one or two tranches show '-' for the missing ones, "
                "and a ₹0 bonus lot shows no stop. Sold = fully squared off, shown with the stops the ladder would have set.")
 
-PLANNER_MIN_STEP = 0.08     # next tranche must be at least 8% above the last tranche's buy price
+PLANNER_MIN_STEP = 0.06     # next tranche must be at least 6% above the last tranche's buy price
 
 def render_next_tranche_planner(sel_type, sel_stock, lots, cmp_price, ic_base):
     """Next tranche for an open position: ideal size from the pyramid on today's IC base, quantity at the current price,
