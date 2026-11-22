@@ -2168,6 +2168,8 @@ def render_price_chart(sel_type, sel_stock, cmp_price=None):
     """Price chart for one stock, held or sold: every buy (blue up-triangle) and sale (red down-triangle) at its price,
     the average buy price of each round (orange dashed; a round ends when the position is fully sold), and, for
     shares still held, the weekly Friday closes (grey line) and the latest close."""
+    import contextlib
+    _stack = contextlib.ExitStack()
     try:
         import altair as alt
         sub = processed_trades[(processed_trades['TYPE'].astype(str).str.strip().str.upper() == sel_type) &
@@ -2241,7 +2243,7 @@ def render_price_chart(sel_type, sel_stock, cmp_price=None):
             lastp = wk_df.sort_values('date').iloc[-1]
             layers.append(alt.Chart(pd.DataFrame([{'date': lastp['date'], 'price': lastp['price']}])).mark_point(filled=True, color=GREEN_, size=90, opacity=1)
                           .encode(x=xenc, y=yenc, tooltip=[alt.Tooltip('price:Q', title='Latest close ₹', format=',.2f')]))
-        st.markdown("#### 📈 Buy / sell price chart")
+        _stack.enter_context(st.expander("📈 Buy / sell price chart", expanded=False))
         st.altair_chart(alt.layer(*layers).properties(height=300 if IS_MOBILE else 380), use_container_width=True)
         tot_pl = sum(m['pl'] for m in marks if m['pl'] is not None)
         bits = ["▲ blue = bought, ▼ red = sold (bigger = more shares)", "orange dashed = average buy price of the round"]
@@ -2254,6 +2256,11 @@ def render_price_chart(sel_type, sel_stock, cmp_price=None):
         st.caption(" · ".join(bits) + ". Hover or tap a marker for details.")
     except Exception as e:
         st.caption(f"Price chart not available ({e}).")
+    finally:
+        try:
+            _stack.close()
+        except Exception:
+            pass
 
 def render_stock_charges(sel_type, sel_stock):
     """Charges on one stock: every tranche (open or closed) with its buy charges, sell charges and Net P/L."""
