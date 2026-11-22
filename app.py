@@ -2164,6 +2164,97 @@ def build_journal(trades):
     }
     return jdf, summary
 
+def render_price_chart(sel_type, sel_stock, cmp_price=None):
+    """Price chart for one stock, held or sold: every buy (blue up-triangle) and sale (red down-triangle) at its price,
+    the average buy price of each round (orange dashed; a round ends when the position is fully sold), and, for
+    shares still held, the weekly Friday closes (grey line) and the latest close."""
+    try:
+        import altair as alt
+        sub = processed_trades[(processed_trades['TYPE'].astype(str).str.strip().str.upper() == sel_type) &
+                               (processed_trades['Stock'].astype(str).str.strip().str.upper() == str(sel_stock).strip().upper())].copy()
+        if sub.empty:
+            return
+        sub['Date of Trxn'] = pd.to_datetime(sub['Date of Trxn'])
+        sub = sub.sort_values('Date of Trxn', kind='stable')
+        marks, rounds, held, cur = [], [], 0.0, None
+        for _, r in sub.iterrows():
+            q, px, d = float(r['Unit']), float(r['Price']), r['Date of Trxn']
+            if q > 0:
+                if cur is None:
+                    cur = {'start': d, 'cost': 0.0, 'qty': 0.0, 'sells': []}
+                cur['cost'] += q * px
+                cur['qty'] += q
+                held += q
+                marks.append({'date': d, 'price': px, 'qty': q, 'kind': 'Bought', 'rnd': len(rounds), 'pl': None})
+            elif q < 0 and cur is not None:
+                avg = cur['cost'] / cur['qty'] if cur['qty'] else 0.0
+                pl = (px - avg) * (-q)
+                held += q
+                marks.append({'date': d, 'price': px, 'qty': -q, 'kind': 'Sold', 'rnd': len(rounds), 'pl': pl})
+                cur['end'] = d
+                if held <= 1e-9:
+                    cur['avg'] = avg
+                    rounds.append(cur)
+                    cur, held = None, 0.0
+        today = pd.Timestamp(ist_now().date())
+        wk = weekly_load()
+        wk = wk[(wk['type'].astype(str).str.upper() == sel_type) & (wk['stock'].astype(str).str.strip().str.upper() == str(sel_stock).strip().upper())] if len(wk) else wk
+        wk_df = pd.DataFrame({'date': pd.to_datetime(wk['friday']), 'price': wk['close'].astype(float)}) if len(wk) and cur is not None else pd.DataFrame(columns=['date', 'price'])
+        if cur is not None:
+            cur['avg'] = cur['cost'] / cur['qty'] if cur['qty'] else 0.0
+            last = max([wk_df['date'].max()] if len(wk_df) else [] + [sub['Date of Trxn'].max()])
+            cur['end'] = max(last, sub['Date of Trxn'].max())
+            rounds.append(cur)
+        seg = pd.DataFrame([{'start': r['start'], 'end': r['end'] if r.get('end') is not None else today, 'avg': r['avg']} for r in rounds])
+        mk = pd.DataFrame(marks)
+        mk['label'] = mk.apply(lambda r: f"₹{r['price']:,.2f} × {r['qty']:,.0f}", axis=1)
+        mk['tip_pl'] = mk['pl'].apply(lambda v: "" if v is None or pd.isna(v) else f"{v:+,.0f} vs round average")
+        mk['date_s'] = mk['date'].dt.strftime('%d %b %Y')
+        BLUE, RED, ORANGE, GREY, GREEN_ = "#1565C0", "#C62828", "#C97A00", "#8A94A0", "#2E7D32"
+        ys = list(mk['price']) + list(wk_df['price']) + list(seg['avg'])
+        lo, hi = min(ys), max(ys)
+        pad = (hi - lo) * 0.18 or hi * 0.1
+        yscale = alt.Scale(domain=[max(lo - pad, 0), hi + pad], nice=False)
+        xmin = min(mk['date'].min(), seg['start'].min()) - pd.Timedelta(days=10)
+        xmax = max(mk['date'].max(), wk_df['date'].max() if len(wk_df) else mk['date'].max()) + pd.Timedelta(days=14)
+        xenc = alt.X('date:T', title=None, scale=alt.Scale(domain=[xmin, xmax]), axis=alt.Axis(format='%b %y', labelFlush=False, tickCount='month', labelOverlap=True))
+        yenc = alt.Y('price:Q', title='Price (₹)', scale=yscale)
+        layers = []
+        if len(wk_df):
+            layers.append(alt.Chart(wk_df).mark_line(color=GREY, strokeWidth=1.6, point=alt.OverlayMarkDef(color=GREY, size=18))
+                          .encode(x=xenc, y=yenc, tooltip=[alt.Tooltip('date:T', title='Friday close', format='%d %b %Y'), alt.Tooltip('price:Q', title='Close ₹', format=',.2f')]))
+        layers.append(alt.Chart(seg).mark_rule(color=ORANGE, strokeDash=[6, 4], strokeWidth=1.6)
+                      .encode(x=alt.X('start:T', scale=alt.Scale(domain=[xmin, xmax])), x2='end:T', y=alt.Y('avg:Q', scale=yscale),
+                              tooltip=[alt.Tooltip('avg:Q', title='Average buy price ₹', format=',.2f')]))
+        shape = alt.Shape('kind:N', scale=alt.Scale(domain=['Bought', 'Sold'], range=['triangle-up', 'triangle-down']), legend=None)
+        colour = alt.Color('kind:N', scale=alt.Scale(domain=['Bought', 'Sold'], range=[BLUE, RED]), legend=None)
+        layers.append(alt.Chart(mk).mark_point(filled=True, opacity=1, stroke='white', strokeWidth=0.8)
+                      .encode(x=xenc, y=yenc, shape=shape, color=colour, size=alt.Size('qty:Q', legend=None, scale=alt.Scale(range=[70, 420])),
+                              tooltip=[alt.Tooltip('kind:N', title=''), alt.Tooltip('date_s:N', title='Date'), alt.Tooltip('price:Q', title='Price ₹', format=',.2f'),
+                                       alt.Tooltip('qty:Q', title='Qty', format=',.0f'), alt.Tooltip('tip_pl:N', title='Result')]))
+        if len(mk) <= 14:
+            layers.append(alt.Chart(mk).mark_text(dy=-16, fontSize=10, color='#6B7785')
+                          .transform_filter(alt.datum.kind == 'Bought').encode(x=xenc, y=yenc, text='label:N'))
+            layers.append(alt.Chart(mk).mark_text(dy=18, fontSize=10, fontWeight='bold', color=RED)
+                          .transform_filter(alt.datum.kind == 'Sold').encode(x=xenc, y=yenc, text='label:N'))
+        if len(wk_df):
+            lastp = wk_df.sort_values('date').iloc[-1]
+            layers.append(alt.Chart(pd.DataFrame([{'date': lastp['date'], 'price': lastp['price']}])).mark_point(filled=True, color=GREEN_, size=90, opacity=1)
+                          .encode(x=xenc, y=yenc, tooltip=[alt.Tooltip('price:Q', title='Latest close ₹', format=',.2f')]))
+        st.markdown("#### 📈 Buy / sell price chart")
+        st.altair_chart(alt.layer(*layers).properties(height=300 if IS_MOBILE else 380), use_container_width=True)
+        tot_pl = sum(m['pl'] for m in marks if m['pl'] is not None)
+        bits = ["▲ blue = bought, ▼ red = sold (bigger = more shares)", "orange dashed = average buy price of the round"]
+        if len(wk_df):
+            bits.append(f"grey line = weekly Friday close (green dot = latest, ₹{lastp['price']:,.2f})")
+        else:
+            bits.append("no weekly price line: weekly closes are kept only for shares you still hold")
+        if any(m['pl'] is not None for m in marks):
+            bits.append(f"sales so far {tot_pl:+,.0f} vs the average buy price of their round, before charges")
+        st.caption(" · ".join(bits) + ". Hover or tap a marker for details.")
+    except Exception as e:
+        st.caption(f"Price chart not available ({e}).")
+
 def render_stock_charges(sel_type, sel_stock):
     """Charges on one stock: every tranche (open or closed) with its buy charges, sell charges and Net P/L."""
     try:
@@ -2741,6 +2832,7 @@ elif page == "Individual Stock":
         choice = st.selectbox("Select a stock (open positions first, then closed)", list(options.keys()),
                               key="ind_stock_choice")
         sel_type, sel_stock = options[choice]
+        render_price_chart(sel_type, sel_stock)
 
         fifo_df = build_fifo_calc_table(processed_trades, sel_type, sel_stock)
         fifo_rows = []
