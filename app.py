@@ -2357,6 +2357,8 @@ PLANNER_MIN_STEP = 0.06     # next tranche must be at least 6% above the last tr
 def render_next_tranche_planner(sel_type, sel_stock, lots, cmp_price, ic_base):
     """Next tranche for an open position: ideal size from the pyramid on today's IC base, quantity at the current price,
     the checks, the stop-loss after the buy, and the FIFO sell order (oldest lots always go first)."""
+    import contextlib
+    _stack = contextlib.ExitStack()
     try:
         pos = [r for r in tranche_sl_risk_rows() if r['type'] == sel_type and r['stock'] == str(sel_stock).strip().upper() and r['open']]
         if not pos or not ic_base or ic_base <= 0 or not cmp_price or cmp_price <= 0:
@@ -2366,7 +2368,7 @@ def render_next_tranche_planner(sel_type, sel_stock, lots, cmp_price, ic_base):
         held_cost = sum(l['remaining'] * l['price'] for l in lots)
         last = tr[k]
         last_amt, last_px = last['q'] * last['px'], last['px']
-        st.markdown("#### 🧮 Next tranche planner (FIFO)")
+        _stack.enter_context(st.expander("🧮 Next tranche planner (FIFO)", expanded=False))
         n = k + 1
         cap_pct = sum(p_ for _, p_ in IDEAL_PYRAMID[:min(n, len(IDEAL_PYRAMID))])
         cap_amt = cap_pct / 100.0 * ic_base
@@ -2435,6 +2437,11 @@ def render_next_tranche_planner(sel_type, sel_stock, lots, cmp_price, ic_base):
                    "Ideal % are T1 2%, T2 1.75%, T3 1.5%, T4 1%, T5 0.75%. Position size is the cost of the shares you still hold.")
     except Exception:
         pass
+    finally:
+        try:
+            _stack.close()
+        except Exception:
+            pass
 
 JOURNAL_COLS = ['Date', 'Long/Short', 'Type', 'Company Name', 'Position No.', 'Tranche No.', 'Entry Price',
                 'Account Balance', 'No. of Shares', 'Amount Deployed', 'IC(%)', 'Initial SL Price', 'Initial Risk',
@@ -2832,56 +2839,9 @@ elif page == "Individual Stock":
         choice = st.selectbox("Select a stock (open positions first, then closed)", list(options.keys()),
                               key="ind_stock_choice")
         sel_type, sel_stock = options[choice]
-        render_price_chart(sel_type, sel_stock)
-
-        fifo_df = build_fifo_calc_table(processed_trades, sel_type, sel_stock)
-        fifo_rows = []
-        for _, r in fifo_df.iterrows():
-            fifo_rows.append([
-                (r['Type'], None), (r['Stock'], None), (fmt_date(r['Buy_Date']), None),
-                (fmt_num(r['Buy_Price']), None), (fmt_num(r['Buy_Qty'], 0), None),
-                (fmt_num(r['Cum_Buy'], 0), None), (fmt_num(r['Cum_Sold'], 0), None),
-                (fmt_num(r['Depleted'], 0), None), (fmt_num(r['Rem_Qty'], 0), None),
-                (fmt_num(r['Rem_Value']), None),
-            ])
-        render_compact_table(
-            ['Type', 'Stock', 'Buy_Date', 'Buy_Price', 'Buy_Qty', 'Cum_Buy',
-             'Cum_Sold', 'Depleted', 'Rem_Qty', 'Rem_Value'],
-            fifo_rows, left_cols=(0, 1), auto_width=True
-        )
-
-        if IS_MOBILE:
-            st.caption("↔ Swipe a table sideways to see all its columns.")
-
         lots = get_remaining_lots(processed_trades, sel_type, sel_stock)
         pos_row = all_pos[(all_pos['Type'] == sel_type) & (all_pos['Stock'] == sel_stock)].iloc[0]
         cmp_price = float(pos_row['CMP'])
-
-        # ---- XIRR for this stock (open or closed) ----
-        _xr, _xd, _xf = stock_xirr(sel_type, sel_stock, cmp_price, float(pos_row['Units']))
-        _out = -sum(a for _, a, *_r in _xf if a < 0)
-        _in = sum(a for _, a, *_r in _xf if a > 0)
-        _div = sum(a for _, a, k, *_r in _xf if k == "Dividend")
-        _net = _in - _out
-        _xcol = None if _xr is None else (UP if _xr >= 0 else DOWN)
-        kpi_grid([
-            ("XIRR (annualised)", fmt_xirr(_xr, _xd), f"over {_xd:,} days" if _xd else None, _xcol, _xcol),
-            ("Total bought", money(_out), None, None),
-            ("Sold + held value" if pos_row['Units'] > 0 else "Total sold", money(_in - _div),
-             f"net {money(_net)}" + (f" · incl. dividends {money(_div)}" if _div else ""), pl_color(_net), None),
-        ], small=True)
-        if _xr is not None and _xd < 90:
-            st.caption("This stock has been held for under 3 months, so the annualised XIRR is not meaningful.")
-        elif _xr is None:
-            st.caption("XIRR cannot be computed yet (needs at least one buy and one sale or holding value).")
-        with st.expander("XIRR cash flows"):
-            _xrows = [[(fmt_date(d), None), (kind, None), ("" if q is None else fmt_num(q, 0), None),
-                       ("" if p is None else fmt_num(p), None),
-                       (money(a), UP if a >= 0 else DOWN)] for d, a, kind, q, p in _xf]
-            render_compact_table(['Date', 'Flow', 'Qty', 'Price', 'Amount ₹'], _xrows, left_cols=(0, 1), auto_width=True)
-            st.caption("Buys are money out (red), sales and dividends are money in (green). The shares still held count as money in today "
-                       "at the current price. XIRR is the single annual rate that makes all these dated flows add up to zero. "
-                       "It is before brokerage and taxes. Dividends are those recorded in the Cash Flow tab.")
 
         _closed_left = False
         if not lots:
@@ -2980,6 +2940,7 @@ elif page == "Individual Stock":
                        "Tranche 4+ = Shaktiman — stop-loss entered by hand (yellow cell) · "
                        "Manual (locked) = a stop-loss you fixed for the whole position (below).")
 
+        if lots:
             # ---- whole-position locked stop-loss: for a fully deployed stock, overrides the rule-based SL ----
             _lock_now = stock_manual.get(LOCK_KEY, 0.0)
             with st.expander("🔒 Lock a manual stop-loss for the whole position" + (f" — active at ₹{_lock_now:,.2f}" if _lock_now > 0 else ""),
@@ -3010,28 +2971,28 @@ elif page == "Individual Stock":
 
             manual_rows = tranche_df[tranche_df['Manual SL']]
             if not manual_rows.empty:
-                st.markdown("##### ✍️ Shaktiman stop-loss — enter by hand")
-                with st.form(f"sl_form_{sel_type}_{sel_stock}"):
-                    entries = {}
-                    for _, mr in manual_rows.iterrows():
-                        existing = mr['Stop-Loss Price']
-                        entries[(mr['Buy Date'], round(float(mr['Buy Price']), 2))] = st.number_input(
-                            f"Tranche {int(mr['Tranche'])} — bought {mr['Buy Date']} @ ₹{mr['Buy Price']:,.2f}",
-                            min_value=0.0, value=0.0 if pd.isna(existing) else float(existing),
-                            step=0.05, format="%.2f",
-                            key=f"sl_{sel_type}_{sel_stock}_{mr['Buy Date']}_{mr['Buy Price']}")
-                    if st.form_submit_button("💾 Save stop-loss"):
-                        try:
-                            save_manual_sl(sel_type, sel_stock, entries)
-                            load_sl_history.clear()
-                        except Exception as exc:
-                            st.error(f"Could not save the stop-loss: {exc}")
-                        else:
-                            st.rerun()
-                if DATABASE_URL:
-                    st.caption("Saved in the database — your trailing stop-loss values survive every deploy.")
-                else:
-                    st.caption("⚠️ No database connected: values are kept in the app file and reset on deploy.")
+                with st.expander("✍️ Shaktiman stop-loss — enter by hand", expanded=False):
+                    with st.form(f"sl_form_{sel_type}_{sel_stock}"):
+                        entries = {}
+                        for _, mr in manual_rows.iterrows():
+                            existing = mr['Stop-Loss Price']
+                            entries[(mr['Buy Date'], round(float(mr['Buy Price']), 2))] = st.number_input(
+                                f"Tranche {int(mr['Tranche'])} — bought {mr['Buy Date']} @ ₹{mr['Buy Price']:,.2f}",
+                                min_value=0.0, value=0.0 if pd.isna(existing) else float(existing),
+                                step=0.05, format="%.2f",
+                                key=f"sl_{sel_type}_{sel_stock}_{mr['Buy Date']}_{mr['Buy Price']}")
+                        if st.form_submit_button("💾 Save stop-loss"):
+                            try:
+                                save_manual_sl(sel_type, sel_stock, entries)
+                                load_sl_history.clear()
+                            except Exception as exc:
+                                st.error(f"Could not save the stop-loss: {exc}")
+                            else:
+                                st.rerun()
+                    if DATABASE_URL:
+                        st.caption("Saved in the database — your trailing stop-loss values survive every deploy.")
+                    else:
+                        st.caption("⚠️ No database connected: values are kept in the app file and reset on deploy.")
                 hist = load_sl_history(sel_type, sel_stock)
                 if not hist.empty:
                     with st.expander(f"🕘 Stop-loss history ({len(hist)} changes)"):
@@ -3047,6 +3008,52 @@ elif page == "Individual Stock":
                         render_compact_table(['When (IST)', 'Tranche (bought)', 'Stop-loss ₹'], h_rows,
                                              left_cols=(0, 1), auto_width=True)
 
+        fifo_df = build_fifo_calc_table(processed_trades, sel_type, sel_stock)
+        fifo_rows = []
+        for _, r in fifo_df.iterrows():
+            fifo_rows.append([
+                (r['Type'], None), (r['Stock'], None), (fmt_date(r['Buy_Date']), None),
+                (fmt_num(r['Buy_Price']), None), (fmt_num(r['Buy_Qty'], 0), None),
+                (fmt_num(r['Cum_Buy'], 0), None), (fmt_num(r['Cum_Sold'], 0), None),
+                (fmt_num(r['Depleted'], 0), None), (fmt_num(r['Rem_Qty'], 0), None),
+                (fmt_num(r['Rem_Value']), None),
+            ])
+        render_compact_table(
+            ['Type', 'Stock', 'Buy_Date', 'Buy_Price', 'Buy_Qty', 'Cum_Buy',
+             'Cum_Sold', 'Depleted', 'Rem_Qty', 'Rem_Value'],
+            fifo_rows, left_cols=(0, 1), auto_width=True
+        )
+
+        if IS_MOBILE:
+            st.caption("↔ Swipe a table sideways to see all its columns.")
+
+        # ---- XIRR for this stock (open or closed) ----
+        _xr, _xd, _xf = stock_xirr(sel_type, sel_stock, cmp_price, float(pos_row['Units']))
+        _out = -sum(a for _, a, *_r in _xf if a < 0)
+        _in = sum(a for _, a, *_r in _xf if a > 0)
+        _div = sum(a for _, a, k, *_r in _xf if k == "Dividend")
+        _net = _in - _out
+        _xcol = None if _xr is None else (UP if _xr >= 0 else DOWN)
+        kpi_grid([
+            ("XIRR (annualised)", fmt_xirr(_xr, _xd), f"over {_xd:,} days" if _xd else None, _xcol, _xcol),
+            ("Total bought", money(_out), None, None),
+            ("Sold + held value" if pos_row['Units'] > 0 else "Total sold", money(_in - _div),
+             f"net {money(_net)}" + (f" · incl. dividends {money(_div)}" if _div else ""), pl_color(_net), None),
+        ], small=True)
+        if _xr is not None and _xd < 90:
+            st.caption("This stock has been held for under 3 months, so the annualised XIRR is not meaningful.")
+        elif _xr is None:
+            st.caption("XIRR cannot be computed yet (needs at least one buy and one sale or holding value).")
+        with st.expander("XIRR cash flows"):
+            _xrows = [[(fmt_date(d), None), (kind, None), ("" if q is None else fmt_num(q, 0), None),
+                       ("" if p is None else fmt_num(p), None),
+                       (money(a), UP if a >= 0 else DOWN)] for d, a, kind, q, p in _xf]
+            render_compact_table(['Date', 'Flow', 'Qty', 'Price', 'Amount ₹'], _xrows, left_cols=(0, 1), auto_width=True)
+            st.caption("Buys are money out (red), sales and dividends are money in (green). The shares still held count as money in today "
+                       "at the current price. XIRR is the single annual rate that makes all these dated flows add up to zero. "
+                       "It is before brokerage and taxes. Dividends are those recorded in the Cash Flow tab.")
+
+        if lots:
             _closed_pre = build_closed_lots_table(processed_trades, sel_type, sel_stock)
             _closed_left = _closed_pre.empty        # nothing sold yet: the short note sits under Risk : Reward
             _lad_col, _pyr_col = st.columns([1, 1])
@@ -3131,6 +3138,8 @@ elif page == "Individual Stock":
                 f"</span></p>",
                 unsafe_allow_html=True
             )
+
+        render_price_chart(sel_type, sel_stock)
 
 elif page == "Trailing Stop Loss":
     st.subheader("🛡️ Trailing Stop Loss")
