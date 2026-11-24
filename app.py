@@ -2895,8 +2895,17 @@ elif page == "Individual Stock":
                 sl_tile = ("Current Stop-Loss", sl_value, sl_pct_txt, sl_pct_col, sl_pct_col)
             else:
                 sl_tile = ("Current Stop-Loss", sl_value, sl_sub, sl_sub_color, sl_sub_color)
+            _ic_sub = None
+            try:   # IC (%) exactly as on the Core & Satellite Audit page: invested value / (Core + Satellite invested + cash)
+                _o1, _o2 = audit_rows(sel_type), audit_rows("SATELLITE" if sel_type == "CORE" else "CORE")
+                _icb = sum(r['Inv'] for r in _o1) + sum(r['Inv'] for r in _o2) + audit_cash_base()
+                _m1 = next((r for r in _o1 if str(r['Stock']).strip().upper() == str(sel_stock).strip().upper()), None)
+                if _m1 and _icb > 0:
+                    _ic_sub = f"IC {_m1['Inv'] / _icb:.2%}"
+            except Exception:
+                _ic_sub = None
             kpi_grid([
-                ("Total Invested Amount", money(total_investment), None, None),
+                ("Total Invested Amount", money(total_investment), _ic_sub, None),
                 ("Current Value", money(current_val), None, None),
                 sl_tile,
             ], small=True)
