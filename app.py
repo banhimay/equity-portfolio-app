@@ -2367,14 +2367,13 @@ def render_next_tranche_planner(sel_type, sel_stock, lots, cmp_price, ic_base):
     import contextlib
     _stack = contextlib.ExitStack()
     try:
-        pos = [r for r in tranche_sl_risk_rows() if r['type'] == sel_type and r['stock'] == str(sel_stock).strip().upper() and r['open']]
-        if not pos or not ic_base or ic_base <= 0 or not cmp_price or cmp_price <= 0:
+        open_lots = [l for l in lots if l['remaining'] > 1e-9 and l['price'] > 0]   # only the tranches still held (FIFO remainder); sold ones are ignored
+        if not open_lots or not ic_base or ic_base <= 0 or not cmp_price or cmp_price <= 0:
             return
-        tr = pos[-1]['tr']
-        k = max(tr)                                  # tranches bought so far in this position
-        held_cost = sum(l['remaining'] * l['price'] for l in lots)
-        last = tr[k]
-        last_amt, last_px = last['q'] * last['px'], last['px']
+        k = len(open_lots)                           # open tranches
+        held_cost = sum(l['remaining'] * l['price'] for l in open_lots)
+        last = open_lots[-1]
+        last_amt, last_px = last['remaining'] * last['price'], last['price']
         _stack.enter_context(st.expander("🧮 Next tranche planner (FIFO)", expanded=False))
         n = k + 1
         cap_pct = sum(p_ for _, p_ in IDEAL_PYRAMID[:min(n, len(IDEAL_PYRAMID))])
@@ -2412,12 +2411,12 @@ def render_next_tranche_planner(sel_type, sel_stock, lots, cmp_price, ic_base):
         render_compact_table(['Check', 'Result'],
                              [[(a, None), (b, UP if ok else DOWN)] for a, b, ok in checks], left_cols=(0, 1), auto_width=True, font_px=12)
         if qty > 0:
-            q_all = sum(t['q'] for t in tr.values()) + qty
-            c_all = sum(t['q'] * t['px'] for t in tr.values()) + qty * cmp_price
+            q_all = sum(l['remaining'] for l in open_lots) + qty
+            c_all = held_cost + qty * cmp_price
             avg = c_all / q_all
             if n == 2:
-                t1 = tr[1]
-                sl = avg - (0.10 * t1['px'] * t1['q']) / q_all
+                t1 = open_lots[0]
+                sl = avg - (0.10 * t1['price'] * t1['remaining']) / q_all
             else:
                 sl = avg    # T3 onward: breakeven (T4+ may carry your manual stop; this is the floor)
             st.markdown(f"**Stop-loss after this buy** ({'T2 rule: same ₹ risk as T1' if n == 2 else 'breakeven = average cost'}): "
@@ -2441,7 +2440,7 @@ def render_next_tranche_planner(sel_type, sel_stock, lots, cmp_price, ic_base):
         order = " → ".join(f"{l['remaining']:,.0f} sh @ {money(l['price'])} ({pd.Timestamp(l['date']).strftime('%d-%b-%y')})" for l in lots)
         st.caption("FIFO sell order, oldest first: " + order + (f" → new T{n} lot" if qty > 0 else "") + ". "
                    "Quantity = ideal % × IC ÷ price, rounded down, and never above the last tranche or the cap for the number of tranches. "
-                   "Ideal % are T1 2%, T2 1.75%, T3 1.5%, T4 1%, T5 0.75%. Position size is the cost of the shares you still hold.")
+                   "Ideal % are T1 2%, T2 1.75%, T3 1.5%, T4 1%, T5 0.75%. Only the tranches you still hold count (sold ones are ignored); position size is the cost of those shares.")
     except Exception:
         pass
     finally:
