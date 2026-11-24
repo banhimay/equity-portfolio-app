@@ -998,7 +998,7 @@ def kpi_grid(items, small=False, narrow=False):
         kpi_style = f" style='background:{bg};border-color:{bg.replace('.20', '.75')};'" if bg else ""
         sub_html = f"<div class='kpi-s' style='color:{sub_color or 'inherit'};'>{esc(sub)}</div>" if sub else ""
         cells += (f"<div class='kpi'{kpi_style}><div class='kpi-l'>{esc(label)}</div>"
-                  f"<div class='kpi-v' style='color:{value_color or 'inherit'};'>{esc(value)}</div>{sub_html}</div>")
+                  f"<div class='kpi-v' style='color:{value_color or 'inherit'};{'font-weight:400;font-size:1rem;line-height:1.4;' if '\n' in str(value) else ''}'>{esc(value).replace(chr(10), '<br>')}</div>{sub_html}</div>")
     st.markdown(f"<div class='kpi-grid{' sm' if small else ''}{' narrow' if narrow else ''}'>{cells}</div>", unsafe_allow_html=True)
 
 def card_html(title=None, right=None, right_color=None, items=(), badge=None, total=False, bg=None):
@@ -2737,11 +2737,18 @@ def render_portfolio_xirr(open_df):
                  f"since {fmt_date(min(d for d, _ in flows))} · {days:,} days", col, col)
     gain_tile = ("Net gain on money put in", money(gain, 0), f"{gain / total_dep:.1%} of deposits" if total_dep else None, pl_color(gain), None)
     value_tile = ("Value today (shares + cash)", money(today_val, 0), f"shares {money(held, 0)} · cash {money(cash, 0)}", None, None)
+    cn_tile = None
+    try:   # contract notes up to: date of the last trade held for each demat
+        _cn = trades_df.dropna(subset=['Account']).groupby('Account')['Date of Trxn'].max()
+        if len(_cn):
+            cn_tile = ("Contract notes up to", "\n".join(f"{a}: {d.strftime('%d-%b-%Y')}" for a, d in _cn.items()), None, None)
+    except Exception:
+        cn_tile = None
     if IS_MOBILE:
         kpi_grid([xirr_tile, gain_tile], small=True)
-        kpi_grid([value_tile], small=True)
+        kpi_grid([value_tile] + ([cn_tile] if cn_tile else []), small=True)
     else:
-        kpi_grid([xirr_tile, gain_tile, value_tile], small=True)
+        kpi_grid([xirr_tile, gain_tile, value_tile] + ([cn_tile] if cn_tile else []), small=True)
     st.caption("XIRR uses your deposits (money out), transfers back and dividends received (money in) and today's value as the final money in. "
                "Cash is the balance typed in the Cash Flow tab. "
                + (f"Includes {money(total_div, 0)} of dividends recorded so far." if total_div else "No dividends are recorded yet."))
