@@ -1783,7 +1783,7 @@ def render_overview_booked(title, df, trades):
         st.markdown(f"#### {title} (0)")
         st.caption("No sales booked yet.")
         return
-    rows_data.sort(key=lambda d: d['Last_Sale'], reverse=True)
+    rows_data.sort(key=lambda d: d['PL'], reverse=True)   # Realized_PL, largest to smallest
     if IS_MOBILE:
         t_cost = sum(d['Cost'] for d in rows_data)
         t_proc = sum(d['Proceeds'] for d in rows_data)
@@ -2789,8 +2789,11 @@ if page == "Dashboard Overview":
     else:
         open_df = portfolio_df[portfolio_df['Units'] > 0]
         render_portfolio_xirr(open_df)
+        _ret = lambda d: (d['Unrealized_PL'] / d['Total_Cost'].where(d['Total_Cost'] != 0)).fillna(0.0)
         core_open = open_df[open_df['Type'] == 'CORE']
         sat_open = open_df[open_df['Type'] == 'SATELLITE']
+        core_open = core_open.assign(_r=_ret(core_open)).sort_values('_r', ascending=False, kind='stable').drop(columns='_r')   # Return_% high to low
+        sat_open = sat_open.assign(_r=_ret(sat_open)).sort_values('_r', ascending=False, kind='stable').drop(columns='_r')
         render_overview_open("🎯 Core Holdings", core_open, link_type="CORE")
         render_overview_open("🚀 Satellite Holdings", sat_open, link_type="SATELLITE")
         render_day_change_summary(core_open, sat_open)
@@ -2799,7 +2802,8 @@ if page == "Dashboard Overview":
 
 elif page == "Core Holdings":
     st.subheader("🎯 Core Holdings")
-    core = portfolio_df[(portfolio_df['Type'] == 'CORE') & (portfolio_df['Units'] > 0)].drop(columns=['Type']).reset_index(drop=True)
+    core = portfolio_df[(portfolio_df['Type'] == 'CORE') & (portfolio_df['Units'] > 0)].drop(columns=['Type'])
+    core = core.assign(_r=((core['Unrealized_PL'] / core['Total_Cost'].where(core['Total_Cost'] != 0)).fillna(0.0))).sort_values('_r', ascending=False, kind='stable').drop(columns='_r').reset_index(drop=True)   # Return_% high to low
     core.index = core.index + 1
     render_type_summary("📊 Core portfolio summary", "CORE")
     render_export_button(core, "Core", "Core Holdings", "exp_core")
@@ -2808,7 +2812,8 @@ elif page == "Core Holdings":
 
 elif page == "Satellite Holdings":
     st.subheader("🚀 Satellite Holdings")
-    sat = portfolio_df[(portfolio_df['Type'] == 'SATELLITE') & (portfolio_df['Units'] > 0)].drop(columns=['Type']).reset_index(drop=True)
+    sat = portfolio_df[(portfolio_df['Type'] == 'SATELLITE') & (portfolio_df['Units'] > 0)].drop(columns=['Type'])
+    sat = sat.assign(_r=((sat['Unrealized_PL'] / sat['Total_Cost'].where(sat['Total_Cost'] != 0)).fillna(0.0))).sort_values('_r', ascending=False, kind='stable').drop(columns='_r').reset_index(drop=True)   # Return_% high to low
     sat.index = sat.index + 1
     render_type_summary("📊 Satellite portfolio summary", "SATELLITE")
     render_export_button(sat, "Satellite", "Satellite Holdings", "exp_sat")
