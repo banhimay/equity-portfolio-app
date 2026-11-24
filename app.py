@@ -410,6 +410,27 @@ def to_yf_symbol(ticker: str) -> str:
         t = f"{t}.NS"
     return t
 
+@st.cache_data(ttl=1800, show_spinner=False)
+def ema_cross_up(stocks):
+    """{stock: True} when the weekly 9 EMA has just crossed above the weekly 21 EMA from below (latest weekly close)."""
+    out = {}
+    for stk in stocks:
+        try:
+            h = yf.Ticker(to_yf_symbol(stk)).history(period="4y")['Close'].dropna()
+            idx = pd.to_datetime(h.index)
+            if getattr(idx, 'tz', None) is not None:
+                idx = idx.tz_localize(None)
+            h.index = idx
+            h = h.resample('W-FRI').last().dropna()      # weekly closes (the running week counts as the latest bar)
+            if len(h) < 30:
+                continue
+            e9, e21 = h.ewm(span=9, adjust=False).mean(), h.ewm(span=21, adjust=False).mean()
+            if e9.iloc[-2] <= e21.iloc[-2] and e9.iloc[-1] > e21.iloc[-1]:
+                out[stk] = True
+        except Exception:
+            pass
+    return out
+
 def _valid(x):
     return x is not None and not pd.isna(x)
 
@@ -784,7 +805,7 @@ def fmt_num(v, decimals=2):
     s = f"{v:,.{decimals}f}"
     return s.rstrip('0').rstrip('.') if decimals > 0 and '.' in s else s
 
-def render_compact_table(headers, rows, left_cols=(), auto_width=False, total_last=False, font_px=12, fit=False, shrink=False, tot_rows=0, bands=None):
+def render_compact_table(headers, rows, left_cols=(), auto_width=False, total_last=False, font_px=12, fit=False, shrink=False, tot_rows=0, bands=None, gap_cols=()):
     """Small-font HTML table that fits in one view. rows = list of lists of
     (text, css_color_or_None). total_last=True styles the last row as a total row.
     Works in light and dark themes."""
@@ -813,8 +834,10 @@ def render_compact_table(headers, rows, left_cols=(), auto_width=False, total_la
                 return rgb
         return None
     def _th(ci, h):
-        t = html_lib.escape(h).replace('_', '_<wbr>') if fit else html_lib.escape(h)
+        t = (html_lib.escape(h).replace('_', '_<wbr>') if fit else html_lib.escape(h)).replace('\n', '<br>')
         rgb = _band(ci)
+        if ci in gap_cols:
+            return "<th style='background:transparent;border:none;min-width:26px;padding:0;'></th>"
         return f"<th style='background:rgba({rgb},0.38);'>{t}</th>" if rgb else f"<th>{t}</th>"
     head = "".join(_th(ci, h) for ci, h in enumerate(headers))
     body = ""
@@ -824,6 +847,9 @@ def render_compact_table(headers, rows, left_cols=(), auto_width=False, total_la
             text, color, *rest = cell
             bg = rest[0] if rest else None
             cls = " class='l'" if ci in left_cols else ""
+            if ci in gap_cols:
+                tds += "<td style='background:transparent;border:none;min-width:26px;padding:0;'></td>"
+                continue
             if bg:
                 style = f" style='background:{bg}; color:{color or '#000'}; font-weight:700;'"
             else:
@@ -1784,6 +1810,7 @@ def render_overview_booked(title, df, trades):
         st.caption("No sales booked yet.")
         return
     rows_data.sort(key=lambda d: d['PL'], reverse=True)   # Realized_PL, largest to smallest
+    _x = ema_cross_up(tuple(d['Stock'] for d in rows_data))   # 9 EMA crossing above 21 EMA from below
     if IS_MOBILE:
         t_cost = sum(d['Cost'] for d in rows_data)
         t_proc = sum(d['Proceeds'] for d in rows_data)
@@ -1796,7 +1823,7 @@ def render_overview_booked(title, df, trades):
                 items=[("Qty sold", f"{d['Qty_Sold']:,.0f}", None), ("Units left", f"{d['Units_Left']:,}", None),
                        ("Cost", money(d['Cost']), None), ("Proceeds", money(d['Proceeds']), None),
                        ("Return", "-" if pd.isna(d['Ret']) else f"{d['Ret']:.1%}", c),
-                       ("Last sale", fmt_date(d['Last_Sale']), None)]))
+                       ("Last sale", fmt_date(d['Last_Sale']), None)] + ([("9/21 EMA (weekly)", "⬆ 9>21", UP)] if _x.get(d['Stock']) else [])))
         cards.append(card_html(
             title="Total", right=money(t_pl), right_color=pl_color(t_pl), total=True,
             items=[("Cost", money(t_cost), None), ("Proceeds", money(t_proc), None),
@@ -1819,6 +1846,7 @@ def render_overview_booked(title, df, trades):
             (f"{d['Qty_Sold']:,.0f}", None), (money(d['Cost']), None), (money(d['Proceeds']), None),
             (money(d['PL']), c), ("-" if pd.isna(d['Ret']) else f"{d['Ret']:.1%}", c),
             (fmt_date(d['Last_Sale']), None),
+            ("", None), ("⬆ 9>21", UP) if _x.get(d['Stock']) else ("", None),
         ])
     t_cost = sum(d['Cost'] for d in rows_data)
     t_proc = sum(d['Proceeds'] for d in rows_data)
@@ -1826,11 +1854,11 @@ def render_overview_booked(title, df, trades):
     rows.append([("", None), ("Total", None), ("", None), ("", None),
                  (f"{sum(d['Qty_Sold'] for d in rows_data):,.0f}", None),
                  (money(t_cost), None), (money(t_proc), None), (money(t_pl), pl_color(t_pl)),
-                 (f"{t_pl / t_cost:.1%}" if t_cost else "-", pl_color(t_pl)), ("", None)])
+                 (f"{t_pl / t_cost:.1%}" if t_cost else "-", pl_color(t_pl)), ("", None), ("", None), ("", None)])
     render_compact_table(
         ['#', 'Stock', 'Status', 'Units_Left', 'Qty_Sold', 'Cost_of_Sold', 'Sale_Proceeds',
-         'Realized_PL', 'Return_%', 'Last_Sale'],
-        rows, left_cols=(1, 2), total_last=True, font_px=12, fit=True, shrink=True
+         'Realized_PL', 'Return_%', 'Last_Sale', '', '9/21\nEMA'],
+        rows, left_cols=(1, 2), total_last=True, font_px=12, fit=True, shrink=True, gap_cols=(10,)
     )
 
 def render_pl_booked(title, df, is_loss):
