@@ -1725,7 +1725,7 @@ def tranche_count(ptype, stock, cmp_):
     lots = get_remaining_lots(processed_trades, ptype, stock)
     if not lots:
         return None
-    return int(len(build_tranche_table(lots, float(cmp_))))
+    return sum(1 for l in lots if l['price'] > 0)     # ₹0 bonus lots are not tranches
 
 def render_overview_open(title, df, heading=True, sum_value_alloc=False, link_type=None, fit=False, ptype=None):
     pill_key = f"ov_open_{link_type}" if link_type else (f"open_stock_{ptype}" if ptype else None)
