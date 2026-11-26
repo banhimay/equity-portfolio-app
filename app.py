@@ -891,6 +891,20 @@ PYRAMID_CAPITAL = 1_000_000
 IDEAL_PYRAMID = [("T1", 2.00), ("T2", 1.75), ("T3", 1.50), ("T4", 1.00), ("T5", 0.75)]
 PYRAMID_COLORS = ["#1565C0", "#0E8A72", "#C97A00", "#6A47C2", "#D9414E", "#8E2C48"]
 
+def _pyramid_df(tdf):
+    """Pyramid input: bonus (₹0) lots are not tranches. Their qty is added to the immediately previous
+    tranche (amount unchanged); a bonus lot with no earlier tranche goes into the next paid one."""
+    rows, carry = [], 0.0
+    for _, r in tdf.iterrows():
+        if float(r['Buy Price']) > 0:
+            r = r.copy(); r['Qty'] = float(r['Qty']) + carry; carry = 0.0
+            rows.append(r)
+        elif rows:
+            rows[-1]['Qty'] = float(rows[-1]['Qty']) + float(r['Qty'])
+        else:
+            carry += float(r['Qty'])
+    return pd.DataFrame(rows, columns=tdf.columns) if rows else tdf.iloc[0:0]
+
 def render_tranche_pyramids(tranche_df, stock, ptype, cap_base=None, ic_pct=None):
     """Small boxed SVG: the ideal pyramid on the left, what has actually been bought on the right
     (amount and qty inside each band, share of this stock's total investment to the right)."""
@@ -2427,7 +2441,7 @@ def render_next_tranche_planner(sel_type, sel_stock, lots, cmp_price, ic_base):
             after = held_cost + qty * cmp_price
             checks.append((f"Position after buy vs ideal cap for {n} tranches ({cap_pct:.2f}% = {money(cap_amt, 0)})",
                            f"{'✓' if room > 0 else '✗'} {money(after, 0)} = {after / ic_base:.2%} of IC" + ("" if room > 0 else " — already at/over the cap"), room > 0))
-            checks.append(("Tranches used", f"✓ {n} of {len(IDEAL_PYRAMID)}", True))
+            checks.append(("Tranches used (bonus lots not counted)", f"✓ {k} of {len(IDEAL_PYRAMID)} used — next is T{n}", True))
         qty_txt = f"{qty} shares ({money(qty * cmp_price, 0)})" if qty > 0 else "0 — do not add"
         if qty == 0 and ideal_pct is not None and not price_ok:
             qty_txt = f"0 — wait for {money(trigger_px)}"
@@ -3149,7 +3163,7 @@ elif page == "Individual Stock":
                 _own, _oth = audit_rows(sel_type), audit_rows("SATELLITE" if sel_type == "CORE" else "CORE")
                 _ic_base = sum(r['Inv'] for r in _own) + sum(r['Inv'] for r in _oth) + audit_cash_base()
                 _me = next((r for r in _own if str(r['Stock']).strip().upper() == str(sel_stock).strip().upper()), None)
-                render_tranche_pyramids(tranche_df, sel_stock, sel_type,
+                render_tranche_pyramids(_pyramid_df(tranche_df), sel_stock, sel_type,   # ₹0 bonus lots are not tranches: folded into the previous tranche
                                         cap_base=_ic_base if _ic_base > 0 else None,
                                         ic_pct=(_me['Inv'] / _ic_base) if (_me and _ic_base > 0) else None)
             render_next_tranche_planner(sel_type, sel_stock, lots, cmp_price, _ic_base)
