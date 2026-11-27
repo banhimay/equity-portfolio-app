@@ -3009,11 +3009,23 @@ elif page == "Individual Stock":
                        "Tranche 4+ = Shaktiman — stop-loss entered by hand (yellow cell) · "
                        "Manual (locked) = a stop-loss you fixed for the whole position (below).")
 
+        # ---- four foldable panels in one row: click one to open it below, click again to close ----
+        _lock_now = stock_manual.get(LOCK_KEY, 0.0) if lots else 0.0
+        manual_rows = tranche_df[tranche_df['Manual SL']] if lots else None
+        hist = load_sl_history(sel_type, sel_stock) if lots else None
+        _panel_names = {"lock": "🔒 Lock a manual stop-loss for the whole position" + (f" — active at ₹{_lock_now:,.2f}" if _lock_now > 0 else ""),
+                        "sl": "✍️ Shaktiman stop-loss — enter by hand",
+                        "hist": f"🕘 Stop-loss history ({0 if hist is None else len(hist)} changes)",
+                        "fifo": "📋 FIFO table"}
+        _panel_ids = (["lock"] if lots else []) + (["sl"] if (lots and not manual_rows.empty) else []) + \
+                     (["hist"] if (lots and not hist.empty) else []) + ["fifo"]
+        _pick = st.pills("Panels", _panel_ids, selection_mode="single", default=None,
+                         format_func=lambda k: _panel_names[k], key=f"panels_{sel_type}_{sel_stock}",
+                         label_visibility="collapsed")
+
         if lots:
             # ---- whole-position locked stop-loss: for a fully deployed stock, overrides the rule-based SL ----
-            _lock_now = stock_manual.get(LOCK_KEY, 0.0)
-            with st.expander("🔒 Lock a manual stop-loss for the whole position" + (f" — active at ₹{_lock_now:,.2f}" if _lock_now > 0 else ""),
-                             expanded=False):
+            if _pick == "lock":
                 st.caption("Use this when you will add no more tranches. The number you enter replaces the rule-based "
                            "stop-loss, and the risk, Risk : Reward and Trailing SL pages all use it. Enter 0 to remove it "
                            "and go back to the rules.")
@@ -3038,9 +3050,8 @@ elif page == "Individual Stock":
                         else:
                             st.rerun()
 
-            manual_rows = tranche_df[tranche_df['Manual SL']]
-            if not manual_rows.empty:
-                with st.expander("✍️ Shaktiman stop-loss — enter by hand", expanded=False):
+            if _pick == "sl" and not manual_rows.empty:
+                if True:
                     with st.form(f"sl_form_{sel_type}_{sel_stock}"):
                         entries = {}
                         for _, mr in manual_rows.iterrows():
@@ -3062,9 +3073,9 @@ elif page == "Individual Stock":
                         st.caption("Saved in the database — your trailing stop-loss values survive every deploy.")
                     else:
                         st.caption("⚠️ No database connected: values are kept in the app file and reset on deploy.")
-                hist = load_sl_history(sel_type, sel_stock)
-                if not hist.empty:
-                    with st.expander(f"🕘 Stop-loss history ({len(hist)} changes)"):
+            if _pick == "hist" and not hist.empty:
+                if True:
+                    if True:
                         h_rows = []
                         for _, hr in hist.iterrows():
                             ts = pd.Timestamp(hr['changed_at']).tz_convert('Asia/Kolkata')
@@ -3077,21 +3088,22 @@ elif page == "Individual Stock":
                         render_compact_table(['When (IST)', 'Tranche (bought)', 'Stop-loss ₹'], h_rows,
                                              left_cols=(0, 1), auto_width=True)
 
-        fifo_df = build_fifo_calc_table(processed_trades, sel_type, sel_stock)
-        fifo_rows = []
-        for _, r in fifo_df.iterrows():
-            fifo_rows.append([
-                (r['Type'], None), (r['Stock'], None), (fmt_date(r['Buy_Date']), None),
-                (fmt_num(r['Buy_Price']), None), (fmt_num(r['Buy_Qty'], 0), None),
-                (fmt_num(r['Cum_Buy'], 0), None), (fmt_num(r['Cum_Sold'], 0), None),
-                (fmt_num(r['Depleted'], 0), None), (fmt_num(r['Rem_Qty'], 0), None),
-                (fmt_num(r['Rem_Value']), None),
-            ])
-        render_compact_table(
-            ['Type', 'Stock', 'Buy_Date', 'Buy_Price', 'Buy_Qty', 'Cum_Buy',
-             'Cum_Sold', 'Depleted', 'Rem_Qty', 'Rem_Value'],
-            fifo_rows, left_cols=(0, 1), auto_width=True
-        )
+        if _pick == "fifo":
+            fifo_df = build_fifo_calc_table(processed_trades, sel_type, sel_stock)
+            fifo_rows = []
+            for _, r in fifo_df.iterrows():
+                fifo_rows.append([
+                    (r['Type'], None), (r['Stock'], None), (fmt_date(r['Buy_Date']), None),
+                    (fmt_num(r['Buy_Price']), None), (fmt_num(r['Buy_Qty'], 0), None),
+                    (fmt_num(r['Cum_Buy'], 0), None), (fmt_num(r['Cum_Sold'], 0), None),
+                    (fmt_num(r['Depleted'], 0), None), (fmt_num(r['Rem_Qty'], 0), None),
+                    (fmt_num(r['Rem_Value']), None),
+                ])
+            render_compact_table(
+                ['Type', 'Stock', 'Buy_Date', 'Buy_Price', 'Buy_Qty', 'Cum_Buy',
+                 'Cum_Sold', 'Depleted', 'Rem_Qty', 'Rem_Value'],
+                fifo_rows, left_cols=(0, 1), auto_width=True
+            )
 
         if IS_MOBILE:
             st.caption("↔ Swipe a table sideways to see all its columns.")
