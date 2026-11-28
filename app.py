@@ -1627,7 +1627,7 @@ def render_fy_reports():
                              use_container_width=True, hide_index=True)
 
 PAGES = ["Dashboard Overview", "Core Holdings", "Satellite Holdings",
-         "Profit/Loss", "Weekly Unrealized P/L", "Core & Satellite Audit", "FY P&L and Balance Sheet", "Individual Stock", "Trailing Stop Loss", "Tranche Stop-Loss Risk", "Trading Journal", "Trade Book & Add Trade", "Cash Flow"]
+         "Profit/Loss", "Weekly Unrealized P/L", "Core & Satellite Audit", "FY P&L and Balance Sheet", "Individual Stock", "Trailing Stop Loss", "Tranche Stop-Loss Risk", "Trading Journal", "Trade Book & Add Trade", "Cash Flow", "Alerts"]
 
 def do_logout():
     st.session_state["authenticated"] = False
@@ -1637,7 +1637,7 @@ def do_refresh():
 
 NAV_LABELS = {
     "Dashboard Overview": "🏠 Overview", "Core Holdings": "🎯 Core", "Satellite Holdings": "🚀 Satellite",
-    "Profit/Loss": "📉 Profit/Loss", "Weekly Unrealized P/L": "📅 Weekly", "Core & Satellite Audit": "🧾 Audit", "FY P&L and Balance Sheet": "🏦 FY Reports", "Individual Stock": "🔍 Stock", "Trailing Stop Loss": "🛡️ Trailing SL", "Tranche Stop-Loss Risk": "📐 Tranche SL Risk", "Trading Journal": "📓 Journal", "Trade Book & Add Trade": "📒 Trades", "Cash Flow": "💰 Cash Flow",
+    "Profit/Loss": "📉 Profit/Loss", "Weekly Unrealized P/L": "📅 Weekly", "Core & Satellite Audit": "🧾 Audit", "FY P&L and Balance Sheet": "🏦 FY Reports", "Individual Stock": "🔍 Stock", "Trailing Stop Loss": "🛡️ Trailing SL", "Tranche Stop-Loss Risk": "📐 Tranche SL Risk", "Trading Journal": "📓 Journal", "Trade Book & Add Trade": "📒 Trades", "Cash Flow": "💰 Cash Flow", "Alerts": "🔔 Alerts",
 }
 
 def _nav_changed():
@@ -1821,9 +1821,6 @@ def render_overview_open(title, df, heading=True, sum_value_alloc=False, link_ty
         return
     rows = []
     cards = []
-    _rtype = ptype or link_type
-    _rng = range_status_many(tuple(df['Stock'].tolist()), _rtype) if _rtype in RANGE_CFG else {}
-    _runit = RANGE_CFG[_rtype]["unit"] if _rtype in RANGE_CFG else ""
     if link_type and not IS_MOBILE:
         stock_link_pills(link_type, df['Stock'].tolist(), f"ov_open_{link_type}")
     for i, (_, r) in enumerate(df.iterrows(), start=1):
@@ -1837,8 +1834,7 @@ def render_overview_open(title, df, heading=True, sum_value_alloc=False, link_ty
                    ("Yest", money(r['Yest_Close']), None), ("1 Day", money(r['Day_Change']), pl_color(r['Day_Change'])),
                    ("Invested", money(r['Total_Cost']), None), ("Value", money(r['Total_Value']), None),
                    ("Unrealized", money(r['Unrealized_PL']), None), ("Realized", money(r['Realized_PL']), None),
-                   ("Net gain", money(r['Total_Net_Gain']), None), ("IC(%)", f"{r['IC(%)']:.1%}", None)]
-                  + ([("Range", f"↔ {_rng[r['Stock']]['n']} {_runit}", None)] if _rng.get(r['Stock'], {}).get('flag') else [])))
+                   ("Net gain", money(r['Total_Net_Gain']), None), ("IC(%)", f"{r['IC(%)']:.1%}", None)]))
         # Return_% = Unrealized_PL / Total_Cost; it shades Unrealized_PL..Total_Net_Gain:
         # negative = light red, 0-25% = light blue, above 25% = green
         ret = (r['Unrealized_PL'] / r['Total_Cost']) if r['Total_Cost'] else 0.0
@@ -1852,8 +1848,6 @@ def render_overview_open(title, df, heading=True, sum_value_alloc=False, link_ty
             (money(r['Realized_PL']), "#111", shade), (money(r['Total_Net_Gain']), "#111", shade),
             (f"{r['IC(%)']:.1%}", None), (f"{ret:.1%}", None),
             ("—" if (tc := tranche_count(ptype or link_type or r.get('Type'), r['Stock'], r['CMP'])) is None else tc, None),
-            ("", None),
-            ((f"↔ {_rng[r['Stock']]['n']} {_runit}", "#B26A00") if _rng.get(r['Stock'], {}).get('flag') else ("", None)),
         ])
     tot = day_change_total(df)
     val_sum, alloc_sum, cost_sum = df['Total_Value'].sum(), df['IC(%)'].sum(), df['Total_Cost'].sum()
@@ -1873,19 +1867,15 @@ def render_overview_open(title, df, heading=True, sum_value_alloc=False, link_ty
             render_cards(cards + [total_card])
         return
     tail = [(money(val_sum), None), (money(unreal_sum), pl_color(unreal_sum)), ("", None), ("", None),
-            (f"{alloc_sum:.1%}", None), (f"{(unreal_sum / cost_sum):.1%}" if cost_sum else "-", None), ("", None), ("", None), ("", None)]
+            (f"{alloc_sum:.1%}", None), (f"{(unreal_sum / cost_sum):.1%}" if cost_sum else "-", None), ("", None)]
     rows.append([("", None), ("Total", None), ("", None), ("", None), (money(cost_sum), None), ("", None), ("", None),
                  (money(tot), pl_color(tot))] + tail)
     render_compact_table(
         ['#', 'Stock', 'Units', 'Avg_Cost', 'Total_Cost', 'CMP', 'Yest_Close', '1_Day_Change',
-         'Total_Value', 'Unrealized_PL', 'Realized_PL', 'Total_Net_Gain', 'IC(%)', 'Return_%', 'Tranche',
-         '', f"Range\n({RANGE_CFG[_rtype]['label']})" if _rtype in RANGE_CFG else 'Range'],
+         'Total_Value', 'Unrealized_PL', 'Realized_PL', 'Total_Net_Gain', 'IC(%)', 'Return_%', 'Tranche'],
         rows, left_cols=(1,), total_last=True, font_px=12 if (link_type or fit) else 13, fit=bool(link_type) or fit,
-        shrink=bool(link_type), gap_cols=(15,)
+        shrink=bool(link_type)
     )
-    if any(v.get('flag') for v in _rng.values()):
-        st.caption(f"**↔ n {_runit}** = range-bound: n {RANGE_CFG[_rtype]['label']} closes inside a band that has not broken. "
-                   "Open the stock to see its top and bottom.")
 
 def render_day_change_summary(core_df, sat_df):
     core_t, sat_t = day_change_total(core_df), day_change_total(sat_df)
@@ -1919,7 +1909,6 @@ def render_overview_booked(title, df, trades):
         st.caption("No sales booked yet.")
         return
     rows_data.sort(key=lambda d: d['PL'], reverse=True)   # Realized_PL, largest to smallest
-    _x = ema_cross_up(tuple(d['Stock'] for d in rows_data))   # 9 EMA crossing above 21 EMA from below
     if IS_MOBILE:
         t_cost = sum(d['Cost'] for d in rows_data)
         t_proc = sum(d['Proceeds'] for d in rows_data)
@@ -1932,7 +1921,7 @@ def render_overview_booked(title, df, trades):
                 items=[("Qty sold", f"{d['Qty_Sold']:,.0f}", None), ("Units left", f"{d['Units_Left']:,}", None),
                        ("Cost", money(d['Cost']), None), ("Proceeds", money(d['Proceeds']), None),
                        ("Return", "-" if pd.isna(d['Ret']) else f"{d['Ret']:.1%}", c),
-                       ("Last sale", fmt_date(d['Last_Sale']), None)] + ([("9/21 EMA (weekly)", "⬆ 9>21", UP)] if _x.get(d['Stock']) else [])))
+                       ("Last sale", fmt_date(d['Last_Sale']), None)]))
         cards.append(card_html(
             title="Total", right=money(t_pl), right_color=pl_color(t_pl), total=True,
             items=[("Cost", money(t_cost), None), ("Proceeds", money(t_proc), None),
@@ -1955,7 +1944,6 @@ def render_overview_booked(title, df, trades):
             (f"{d['Qty_Sold']:,.0f}", None), (money(d['Cost']), None), (money(d['Proceeds']), None),
             (money(d['PL']), c), ("-" if pd.isna(d['Ret']) else f"{d['Ret']:.1%}", c),
             (fmt_date(d['Last_Sale']), None),
-            ("", None), ("⬆ 9>21", UP) if _x.get(d['Stock']) else ("", None),
         ])
     t_cost = sum(d['Cost'] for d in rows_data)
     t_proc = sum(d['Proceeds'] for d in rows_data)
@@ -1963,11 +1951,11 @@ def render_overview_booked(title, df, trades):
     rows.append([("", None), ("Total", None), ("", None), ("", None),
                  (f"{sum(d['Qty_Sold'] for d in rows_data):,.0f}", None),
                  (money(t_cost), None), (money(t_proc), None), (money(t_pl), pl_color(t_pl)),
-                 (f"{t_pl / t_cost:.1%}" if t_cost else "-", pl_color(t_pl)), ("", None), ("", None), ("", None)])
+                 (f"{t_pl / t_cost:.1%}" if t_cost else "-", pl_color(t_pl)), ("", None)])
     render_compact_table(
         ['#', 'Stock', 'Status', 'Units_Left', 'Qty_Sold', 'Cost_of_Sold', 'Sale_Proceeds',
-         'Realized_PL', 'Return_%', 'Last_Sale', '', '9/21\nEMA'],
-        rows, left_cols=(1, 2), total_last=True, font_px=12, fit=True, shrink=True, gap_cols=(10,)
+         'Realized_PL', 'Return_%', 'Last_Sale'],
+        rows, left_cols=(1, 2), total_last=True, font_px=12, fit=True, shrink=True
     )
 
 def render_pl_booked(title, df, is_loss):
@@ -3968,3 +3956,73 @@ elif page == "Cash Flow":
                 cash_delete_entry(pick)
                 st.session_state["cash_msg"] = f"Removed: {names[pick]}"
                 st.rerun()
+
+elif page == "Alerts":
+    st.subheader("🔔 Alerts")
+    if portfolio_df.empty:
+        st.info("No trades yet.")
+    else:
+        _open = portfolio_df[portfolio_df['Units'] > 0]
+        _tname = {"CORE": "Core", "SATELLITE": "Satellite"}
+        # ---------- range-bound ----------
+        for _pt in ("CORE", "SATELLITE"):
+            _cfg = RANGE_CFG[_pt]
+            _o = _open[_open['Type'] == _pt]
+            _res = range_status_many(tuple(_o['Stock'].tolist()), _pt) if len(_o) else {}
+            _hits = sorted([(stk, v) for stk, v in _res.items() if v.get('flag')], key=lambda kv: -kv[1]['n'])
+            st.markdown(f"#### ↔ Range-bound — {_tname[_pt]} ({_cfg['label']} closes) ({len(_hits)})")
+            if not _hits:
+                st.caption("None right now.")
+                continue
+            if not IS_MOBILE:
+                stock_link_pills(_pt, [k for k, _ in _hits], f"al_rng_{_pt}")
+            _rows = []
+            for _i, (stk, v) in enumerate(_hits, start=1):
+                _cmp = float(_o.loc[_o['Stock'] == stk, 'CMP'].iloc[0])
+                _pos = (_cmp - v['bottom']) / (v['top'] - v['bottom']) if v['top'] > v['bottom'] else 0
+                if _cmp > v['top']:
+                    _txt, _col = f"above top — breakout if the {_cfg['label'].replace('ly', '')} closes here", "#B26A00"
+                elif 0 < _cmp < v['bottom']:
+                    _txt, _col = f"below bottom — breakdown if the {_cfg['label'].replace('ly', '')} closes here", "#B26A00"
+                else:
+                    _txt, _col = f"inside, {_pos:.0%} up the band", None
+                _rows.append([(_i, None), ((stk if IS_MOBILE else ("LINK", f"al_rng_{_pt}", stk)), None),
+                              (f"{v['n']} {_cfg['unit']}", None), (money(v['top']), None), (money(v['bottom']), None),
+                              (f"{v['width']:.1%}", None), (f"{v['tops']} / {v['bots']}", None),
+                              (money(_cmp), None), (_txt, _col)])
+            render_compact_table(['#', 'Stock', 'Closes inside', 'Top', 'Bottom', 'Width', 'Touches\ntop / bottom', 'CMP', 'CMP vs band'],
+                                 _rows, left_cols=(1, 8), font_px=12)
+        st.caption("Range-bound = closing prices (wicks ignored) stayed inside a band, tested on completed candles only: "
+                   "monthly for Core, weekly for Satellite. It ends when a candle closes above the top or below the bottom. "
+                   "Thresholds are in RANGE_CFG in the app code.")
+
+        # ---------- 9/21 EMA on sold stocks ----------
+        _sold = []
+        for _, r in portfolio_df.iterrows():
+            _lots = build_closed_lots_table(processed_trades, r['Type'], r['Stock'])
+            if _lots.empty:
+                continue
+            _sold.append({'Stock': r['Stock'], 'Type': r['Type'], 'Units_Left': int(r['Units']),
+                          'PL': _lots['Realized P/L'].sum(), 'Last_Sale': _lots['Sell Date'].max(),
+                          'CMP': float(r['CMP']) if pd.notna(r['CMP']) else 0.0})
+        _xm = ema_cross_up(tuple(d['Stock'] for d in _sold)) if _sold else {}
+        _hit = [d for d in _sold if _xm.get(d['Stock'])]
+        st.markdown(f"#### ⬆ 9/21 EMA (weekly) — sold stocks where the 9 EMA has just crossed above the 21 EMA ({len(_hit)})")
+        if not _hit:
+            st.caption("None right now.")
+        else:
+            if not IS_MOBILE:
+                for _pt in ("CORE", "SATELLITE"):
+                    _g = [d for d in _hit if d['Type'] == _pt]
+                    if _g:
+                        stock_link_pills(_pt, [d['Stock'] for d in _g], f"al_ema_{_pt}",
+                                         closed=[d['Stock'] for d in _g if d['Units_Left'] == 0])
+            _rows = []
+            for _i, d in enumerate(sorted(_hit, key=lambda d: d['Stock']), start=1):
+                _rows.append([(_i, None), ((d['Stock'] if IS_MOBILE else ("LINK", f"al_ema_{d['Type']}", d['Stock'])), None),
+                              (_tname.get(d['Type'], d['Type']), None), (fmt_date(d['Last_Sale']), None),
+                              (money(d['PL']), pl_color(d['PL'])), (money(d['CMP']) if d['CMP'] > 0 else "—", None),
+                              ("⬆ 9>21", UP)])
+            render_compact_table(['#', 'Stock', 'Type', 'Last sale', 'Realized P/L', 'CMP', 'Signal'],
+                                 _rows, left_cols=(1, 2), font_px=12)
+        st.caption("Weekly 9 EMA crossed above the 21 EMA from below at the latest weekly close — a possible re-entry watch for stocks you have sold.")
