@@ -436,6 +436,86 @@ def ema_cross_up(stocks):
             pass
     return out
 
+# ---- Range-bound detector: closing prices only (wicks ignored), completed candles only ----
+# Core uses monthly closes, Satellite uses weekly closes. Change these numbers to tune the flag.
+RANGE_CFG = {
+    "CORE":      {"freq": "M",     "unit": "mo", "label": "monthly", "min_n": 6, "max_width": 0.28, "lookback": 36, "touch": 0.15},
+    "SATELLITE": {"freq": "W-FRI", "unit": "wk", "label": "weekly",  "min_n": 8, "max_width": 0.14, "lookback": 52, "touch": 0.15},
+}
+
+def _range_analyse(closes, cfg, now=None):
+    """closes: completed-candle closes (oldest first). Tries the longest recent run of closes first, then shorter ones,
+    and returns the first that is inside a band no wider than max_width AND has: enough closes, tops and bottoms each
+    touched twice, no drift, and a flat tangled 9/21 EMA. If none passes, says why the longest candidate failed."""
+    c = [float(x) for x in closes if x == x]
+    if len(c) < cfg["min_n"]:
+        return {"flag": False, "reason": "not enough history"}
+    s = pd.Series(c)
+    e9, e21 = s.ewm(span=9, adjust=False).mean(), s.ewm(span=21, adjust=False).mean()
+    first_fail = None
+    for n in range(min(cfg["lookback"], len(c)), cfg["min_n"] - 1, -1):
+        w = c[-n:]
+        lo, hi = min(w), max(w)
+        if lo <= 0 or (hi - lo) / lo > cfg["max_width"]:
+            continue
+        width, height = (hi - lo) / lo, hi - lo
+        zone = height * cfg["touch"]
+        def clusters(test):
+            k, prev = 0, False
+            for x in w:
+                t = test(x)
+                if t and not prev:
+                    k += 1
+                prev = t
+            return k
+        tops, bots = clusters(lambda x: x >= hi - zone), clusters(lambda x: x <= lo + zone)
+        half = n // 2
+        drift = abs(sum(w[half:]) / len(w[half:]) - sum(w[:half]) / len(w[:half])) / height if height else 0
+        ema_gap = abs(e9.iloc[-1] - e21.iloc[-1]) / e21.iloc[-1]
+        ema_slope = abs(e21.iloc[-1] - e21.iloc[-n]) / e21.iloc[-n]
+        out = {"flag": True, "n": n, "top": hi, "bottom": lo, "width": width, "tops": tops, "bots": bots, "reason": ""}
+        if tops < 2 or bots < 2:
+            out.update(flag=False, reason=f"only {tops} top / {bots} bottom touches (need 2 each)")
+        elif drift > 0.5:
+            out.update(flag=False, reason="closes are drifting up or down inside the band")
+        elif ema_gap > 0.35 * width or ema_slope > 0.5 * width:
+            out.update(flag=False, reason="9/21 EMA are not flat and tangled")
+        if out["flag"]:
+            return out
+        first_fail = first_fail or out
+    if first_fail:
+        return first_fail
+    w = c[-cfg["min_n"]:]
+    lo, hi = min(w), max(w)
+    return {"flag": False, "reason": f"last {cfg['min_n']} closes span {(hi - lo) / lo:.0%}, wider than the {cfg['max_width']:.0%} limit",
+            "top": hi, "bottom": lo}
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def range_status(stock, ptype):
+    """Range-bound status of one stock on its own timeframe (monthly for CORE, weekly for SATELLITE)."""
+    cfg = RANGE_CFG.get(ptype, RANGE_CFG["CORE"])
+    try:
+        h = yf.Ticker(to_yf_symbol(stock)).history(period="6y")['Close'].dropna()
+        idx = pd.to_datetime(h.index)
+        if getattr(idx, 'tz', None) is not None:
+            idx = idx.tz_localize(None)
+        h.index = idx
+        h = h.resample(cfg["freq"]).last().dropna()
+        today = ist_now().date()
+        # drop the candle that is still running: its label (period end) is today or later
+        if len(h) and h.index[-1].date() >= today:
+            h = h.iloc[:-1]
+        return _range_analyse(h.tolist(), cfg)
+    except Exception:
+        return {"flag": False, "reason": "price history not available"}
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def range_status_many(stocks, ptype):
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        res = list(ex.map(lambda x: range_status(x, ptype), stocks))
+    return dict(zip(stocks, res))
+
 def _valid(x):
     return x is not None and not pd.isna(x)
 
@@ -1741,6 +1821,9 @@ def render_overview_open(title, df, heading=True, sum_value_alloc=False, link_ty
         return
     rows = []
     cards = []
+    _rtype = ptype or link_type
+    _rng = range_status_many(tuple(df['Stock'].tolist()), _rtype) if _rtype in RANGE_CFG else {}
+    _runit = RANGE_CFG[_rtype]["unit"] if _rtype in RANGE_CFG else ""
     if link_type and not IS_MOBILE:
         stock_link_pills(link_type, df['Stock'].tolist(), f"ov_open_{link_type}")
     for i, (_, r) in enumerate(df.iterrows(), start=1):
@@ -1754,7 +1837,8 @@ def render_overview_open(title, df, heading=True, sum_value_alloc=False, link_ty
                    ("Yest", money(r['Yest_Close']), None), ("1 Day", money(r['Day_Change']), pl_color(r['Day_Change'])),
                    ("Invested", money(r['Total_Cost']), None), ("Value", money(r['Total_Value']), None),
                    ("Unrealized", money(r['Unrealized_PL']), None), ("Realized", money(r['Realized_PL']), None),
-                   ("Net gain", money(r['Total_Net_Gain']), None), ("IC(%)", f"{r['IC(%)']:.1%}", None)]))
+                   ("Net gain", money(r['Total_Net_Gain']), None), ("IC(%)", f"{r['IC(%)']:.1%}", None)]
+                  + ([("Range", f"↔ {_rng[r['Stock']]['n']} {_runit}", None)] if _rng.get(r['Stock'], {}).get('flag') else [])))
         # Return_% = Unrealized_PL / Total_Cost; it shades Unrealized_PL..Total_Net_Gain:
         # negative = light red, 0-25% = light blue, above 25% = green
         ret = (r['Unrealized_PL'] / r['Total_Cost']) if r['Total_Cost'] else 0.0
@@ -1768,6 +1852,8 @@ def render_overview_open(title, df, heading=True, sum_value_alloc=False, link_ty
             (money(r['Realized_PL']), "#111", shade), (money(r['Total_Net_Gain']), "#111", shade),
             (f"{r['IC(%)']:.1%}", None), (f"{ret:.1%}", None),
             ("—" if (tc := tranche_count(ptype or link_type or r.get('Type'), r['Stock'], r['CMP'])) is None else tc, None),
+            ("", None),
+            ((f"↔ {_rng[r['Stock']]['n']} {_runit}", "#B26A00") if _rng.get(r['Stock'], {}).get('flag') else ("", None)),
         ])
     tot = day_change_total(df)
     val_sum, alloc_sum, cost_sum = df['Total_Value'].sum(), df['IC(%)'].sum(), df['Total_Cost'].sum()
@@ -1787,15 +1873,19 @@ def render_overview_open(title, df, heading=True, sum_value_alloc=False, link_ty
             render_cards(cards + [total_card])
         return
     tail = [(money(val_sum), None), (money(unreal_sum), pl_color(unreal_sum)), ("", None), ("", None),
-            (f"{alloc_sum:.1%}", None), (f"{(unreal_sum / cost_sum):.1%}" if cost_sum else "-", None), ("", None)]
+            (f"{alloc_sum:.1%}", None), (f"{(unreal_sum / cost_sum):.1%}" if cost_sum else "-", None), ("", None), ("", None), ("", None)]
     rows.append([("", None), ("Total", None), ("", None), ("", None), (money(cost_sum), None), ("", None), ("", None),
                  (money(tot), pl_color(tot))] + tail)
     render_compact_table(
         ['#', 'Stock', 'Units', 'Avg_Cost', 'Total_Cost', 'CMP', 'Yest_Close', '1_Day_Change',
-         'Total_Value', 'Unrealized_PL', 'Realized_PL', 'Total_Net_Gain', 'IC(%)', 'Return_%', 'Tranche'],
+         'Total_Value', 'Unrealized_PL', 'Realized_PL', 'Total_Net_Gain', 'IC(%)', 'Return_%', 'Tranche',
+         '', f"Range\n({RANGE_CFG[_rtype]['label']})" if _rtype in RANGE_CFG else 'Range'],
         rows, left_cols=(1,), total_last=True, font_px=12 if (link_type or fit) else 13, fit=bool(link_type) or fit,
-        shrink=bool(link_type)
+        shrink=bool(link_type), gap_cols=(15,)
     )
+    if any(v.get('flag') for v in _rng.values()):
+        st.caption(f"**↔ n {_runit}** = range-bound: n {RANGE_CFG[_rtype]['label']} closes inside a band that has not broken. "
+                   "Open the stock to see its top and bottom.")
 
 def render_day_change_summary(core_df, sat_df):
     core_t, sat_t = day_change_total(core_df), day_change_total(sat_df)
@@ -2968,6 +3058,31 @@ elif page == "Individual Stock":
                 ("Current Value", money(current_val), None, None),
                 sl_tile,
             ], small=True)
+
+            _rs = range_status(sel_stock, sel_type) if sel_type in RANGE_CFG else None
+            if _rs:
+                _rc = RANGE_CFG[sel_type]
+                if _rs.get('flag'):
+                    _pos = ""
+                    if cmp_price > _rs['top']:
+                        _pos = f"CMP is above the top now — a breakout once the {_rc['label']} candle closes there."
+                    elif 0 < cmp_price < _rs['bottom']:
+                        _pos = f"CMP is below the bottom now — a breakdown once the {_rc['label']} candle closes there."
+                    st.markdown(f"##### ↔ Range-bound ({_rc['label']} closes)")
+                    kpi_grid([
+                        ("Status", "↔ Range-bound", f"{_rs['n']} {_rc['label']} closes inside", "#B26A00", "#B26A00"),
+                        ("Top of range (highest close)", money(_rs['top']), None, None),
+                        ("Bottom of range (lowest close)", money(_rs['bottom']), None, None),
+                    ], small=True)
+                    kpi_grid([
+                        ("Range width", f"{_rs['width']:.1%}", None, None),
+                        (f"Closes inside", str(_rs['n']), None, None),
+                        ("Touches (top / bottom)", f"{_rs['tops']} / {_rs['bots']}", None, None),
+                    ], small=True)
+                    st.caption(f"Breaks out when a {_rc['label']} close is above {money(_rs['top'])} · breaks down when a close is below "
+                               f"{money(_rs['bottom'])}. The flag turns off the {_rc['unit'].replace('mo','month').replace('wk','week')} that happens. {_pos}")
+                else:
+                    st.caption(f"↔ Range-bound ({_rc['label']}): **no** — {_rs.get('reason') or 'no range'}.")
 
             st.markdown("#### Tranche Breakdown & Stop-Loss (open position)")
             MANUAL_BG = "#FFE08A"   # yellow = enter this cell by hand
