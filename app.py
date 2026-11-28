@@ -399,6 +399,9 @@ trades_df, overrides_df = load_data()
 manual_sl_df = load_manual_sl()
 
 # --- LIVE PRICE FETCHING ENGINE ---
+# stocks whose Yahoo Finance symbol is not simply <NAME>.NS (NSE itself is only on Yahoo as NSE.BO)
+YF_SYMBOL_ALIAS = {"NSE": "NSE.BO"}
+
 def to_yf_symbol(ticker: str) -> str:
     """Normalize a stock name to a yfinance-compatible NSE symbol.
     Strips an 'NSE:' prefix if present (used elsewhere for GOOGLEFINANCE-style
@@ -406,6 +409,8 @@ def to_yf_symbol(ticker: str) -> str:
     t = ticker.strip().upper()
     if t.startswith("NSE:"):
         t = t[len("NSE:"):]
+    if t in YF_SYMBOL_ALIAS:
+        return YF_SYMBOL_ALIAS[t]
     if not t.endswith(".NS"):
         t = f"{t}.NS"
     return t
